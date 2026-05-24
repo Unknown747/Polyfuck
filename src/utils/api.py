@@ -1,15 +1,16 @@
-"""Polymarket API client - Gamma, CLOB, and Data APIs."""
+"""Polymarket API clients - Gamma, CLOB (via py-clob-client-v2), and Data APIs."""
 
-import time
-import json
-import hmac
-import hashlib
 import requests
 from typing import Any
-from eth_account.messages import encode_defunct
-from web3 import Web3
 
 from src.config import config
+
+# Try to import the official client; fall back gracefully
+try:
+    from py_clob_client_v2 import ClobClient as OfficialClobClient, ApiCreds
+    HAS_OFFICIAL_CLIENT = True
+except ImportError:
+    HAS_OFFICIAL_CLIENT = False
 
 
 class GammaClient:
@@ -57,165 +58,167 @@ class GammaClient:
 
 
 class ClobClient:
-    """CLOB API client for order books, prices, and trading. Requires auth for trading."""
+    """CLOB API client wrapping the official py-clob-client-v2.
 
-    def __init__(self):
+    Handles authentication, order placement, balance queries, etc.
+    """
+
+    def __init__(self, private_key: str | None = None):
         self.base_url = config.CLOB_API_URL
-        self.session = requests.Session()
-        self.session.headers.update({"Accept": "application/json"})
-        # Auth state - set up via authenticate()
         self.api_key: str = ""
         self.api_secret: str = ""
         self.api_passphrase: str = ""
         self.address: str = ""
         self._authenticated = False
+        self._client: Any = None  # Official py-clob-client-v2 instance
 
-    def _get(self, path: str, params: dict | None = None) -> Any:
-        """Unauthenticated GET request."""
-        resp = self.session.get(f"{self.base_url}{path}", params=params, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
-
-    def _auth_headers(self, method: str, path: str) -> dict:
-        """Generate L2 authentication headers for authenticated requests."""
-        if not self._authenticated:
-            raise RuntimeError("Not authenticated. Call authenticate() first.")
-
-        timestamp = str(int(time.time()))
-        message = f"{timestamp}{method}{path}"
-        signature = hmac.new(
-            self.api_secret.encode(), message.encode(), hashlib.sha256
-        ).hexdigest()
-
-        return {
-            "POLY_ADDRESS": self.address,
-            "POLY_SIGNATURE": signature,
-            "POLY_TIMESTAMP": timestamp,
-            "POLY_API_KEY": self.api_key,
-            "POLY_PASSPHRASE": self.api_passphrase,
-        }
-
-    def _auth_request(self, method: str, path: str, json_data: dict | None = None) -> Any:
-        """Make an authenticated request."""
-        headers = self._auth_headers(method, path)
-        headers["Content-Type"] = "application/json"
-        if json_data:
-            resp = self.session.request(method, f"{self.base_url}{path}", headers=headers, json=json_data, timeout=15)
-        else:
-            resp = self.session.request(method, f"{self.base_url}{path}", headers=headers, timeout=15)
-        resp.raise_for_status()
-        try:
-            return resp.json()
-        except json.JSONDecodeError:
-            return {"status": resp.status_code, "text": resp.text}
+        if private_key and HAS_OFFICIAL_CLIENT:
+            self.authenticate(private_key)
 
     def authenticate(self, private_key: str) -> dict:
-        """Create or derive API credentials from a private key (L1 -> L2 auth)."""
+        """Authenticate with the CLOB API using EIP-712 signing.
+
+        Creates or derives API credentials from wallet private key.
+        """
+        if not HAS_OFFICIAL_CLIENT:
+            raise RuntimeError(
+                "py-clob-client-v2 is required for trading. "
+                "Install with: pip install py-clob-client-v2"
+            )
+
         from eth_account import Account
         account = Account.from_key(private_key)
         self.address = account.address
 
-        # Create L1 signature for API key derivation
-        timestamp = str(int(time.time()))
-        message = f"Polymarket Authentication\n{timestamp}"
-        signed = account.sign_message(encode_defunct(text=message))
-
-        l1_headers = {
-            "POLY_ADDRESS": self.address,
-            "POLY_SIGNATURE": signed.signature.hex(),
-            "POLY_TIMESTAMP": timestamp,
-            "POLY_NONCE": str(int(time.time() * 1000)),
-        }
-
-        # First try to derive existing key
-        resp = self.session.get(
-            f"{self.base_url}/auth/derive-api-key",
-            headers=l1_headers,
-            timeout=15,
+        # Create the official client with the private key
+        self._client = OfficialClobClient(
+            host=self.base_url,
+            chain_id=137,  # Polygon mainnet
+            key=private_key,
         )
 
-        if resp.status_code == 200:
-            creds = resp.json()
-        else:
-            # Create new API key
-            resp = self.session.post(
-                f"{self.base_url}/auth/api-key",
-                headers=l1_headers,
-                timeout=15,
-            )
-            resp.raise_for_status()
-            creds = resp.json()
+        # Create or derive API credentials
+        creds = self._client.create_or_derive_api_key()
+        self._client.set_api_creds(creds)
 
-        self.api_key = creds["apiKey"]
-        self.api_secret = creds["secret"]
-        self.api_passphrase = creds["passphrase"]
+        self.api_key = creds.api_key
+        self.api_secret = creds.api_secret
+        self.api_passphrase = creds.api_passphrase
         self._authenticated = True
 
-        return creds
+        return {
+            "apiKey": creds.api_key,
+            "secret": creds.api_secret,
+            "passphrase": creds.api_passphrase,
+        }
+
+    def get_address(self) -> str:
+        """Get the authenticated wallet address."""
+        if self._client:
+            return self._client.get_address()
+        return self.address
 
     # === Public endpoints (no auth required) ===
 
     def get_orderbook(self, token_id: str) -> dict:
         """Get order book for a token."""
-        return self._get("/book", {"token_id": token_id})
+        if self._client:
+            return self._client.get_order_book(token_id)
+        raise RuntimeError("Not authenticated")
 
     def get_price(self, token_id: str, side: str = "BUY") -> float:
         """Get best price for a token."""
-        result = self._get("/price", {"token_id": token_id, "side": side})
-        if isinstance(result, dict) and "price" in result:
-            return float(result["price"])
-        return 0.0
+        if self._client:
+            result = self._client.get_price(token_id, side)
+            if isinstance(result, dict) and "price" in result:
+                return float(result["price"])
+            return float(result) if result else 0.0
+        raise RuntimeError("Not authenticated")
 
     def get_midpoint(self, token_id: str) -> float:
         """Get midpoint price for a token."""
-        result = self._get("/midpoint", {"token_id": token_id})
-        if isinstance(result, dict) and "midpoint" in result:
-            return float(result["midpoint"])
-        return 0.0
+        if self._client:
+            return self._client.get_midpoint(token_id)
+        raise RuntimeError("Not authenticated")
 
     def get_spread(self, token_id: str) -> float:
         """Get spread for a token."""
-        result = self._get("/spread", {"token_id": token_id})
-        if isinstance(result, dict) and "spread" in result:
-            return float(result["spread"])
-        return 0.0
+        if self._client:
+            return float(self._client.get_spread(token_id))
+        raise RuntimeError("Not authenticated")
 
     def get_last_trade_price(self, token_id: str) -> float:
         """Get last trade price."""
-        result = self._get("/last-trade-price", {"token_id": token_id})
-        if isinstance(result, dict) and "price" in result:
-            return float(result["price"])
-        return 0.0
+        if self._client:
+            return float(self._client.get_last_trade_price(token_id))
+        raise RuntimeError("Not authenticated")
 
     def get_price_history(self, condition_id: str, interval: str = "1d") -> list[dict]:
         """Get historical prices for a market."""
-        return self._get("/prices-history", {"market": condition_id, "interval": interval})
+        if self._client:
+            return self._client.get_prices_history(
+                {"market": condition_id, "interval": interval}
+            )
+        raise RuntimeError("Not authenticated")
 
     # === Authenticated endpoints ===
 
-    def get_balance_allowance(self) -> dict:
+    def get_balance_allowance(self, asset_type: str = "COLLATERAL") -> dict:
         """Check USDC balance and allowances."""
-        return self._auth_request("GET", "/balance-allowance")
+        if not self._client:
+            raise RuntimeError("Not authenticated")
+        from py_clob_client_v2 import BalanceAllowanceParams, AssetType
+        atype = AssetType.COLLATERAL if asset_type == "COLLATERAL" else AssetType.CONDITIONAL
+        return self._client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=atype)
+        )
 
     def post_order(self, order_data: dict) -> dict:
-        """Place an order (authenticated)."""
-        return self._auth_request("POST", "/order", order_data)
+        """Place an order (authenticated). Uses official client."""
+        if not self._client:
+            raise RuntimeError("Not authenticated")
+        # This will be called via create_and_post_order in the trader
+        # For direct use, pass the signed order from create_order
+        return self._client.post_order(order_data)
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancel an order by ID."""
-        return self._auth_request("DELETE", f"/order/{order_id}")
+        if not self._client:
+            raise RuntimeError("Not authenticated")
+        from py_clob_client_v2 import OrderPayload
+        return self._client.cancel_order(OrderPayload(order_id=order_id))
 
     def cancel_all_orders(self) -> dict:
         """Cancel all open orders."""
-        return self._auth_request("DELETE", "/cancel-all")
+        if not self._client:
+            raise RuntimeError("Not authenticated")
+        return self._client.cancel_all()
 
     def get_open_orders(self) -> list[dict]:
         """Get all open orders."""
-        return self._auth_request("GET", "/orders")
+        if not self._client:
+            raise RuntimeError("Not authenticated")
+        return self._client.get_open_orders()
 
     def send_heartbeat(self) -> dict:
         """Send heartbeat to keep orders alive (every 10s recommended)."""
-        return self._auth_request("POST", "/heartbeat")
+        if not self._client:
+            raise RuntimeError("Not authenticated")
+        return self._client.post_heartbeat()
+
+    def create_and_post_order(self, order_args, options=None, order_type="GTC"):
+        """Create and post an order in one step.
+        
+        Args:
+            order_args: OrderArgsV2 or MarketOrderArgsV2
+            options: CreateOrderOptions (tick_size, etc.)
+            order_type: "GTC", "FOK", "GTD", etc.
+        """
+        if not self._client:
+            raise RuntimeError("Not authenticated")
+        from py_clob_client_v2 import OrderType
+        ot = OrderType(order_type)
+        return self._client.create_and_post_order(order_args, options, ot)
 
 
 class DataClient:
