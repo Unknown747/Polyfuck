@@ -45,7 +45,14 @@ class Config:
 
     # Token addresses on Polygon
     USDC_NATIVE: str = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"   # Native USDC (Circle)
-    USDC_BRIDGED: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e (Polymarket)
+    USDC_BRIDGED: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"  # USDC.e (bridged)
+    PUSD: str = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"           # pUSD (Polymarket USD proxy)
+
+    # Polymarket V2 contract addresses (Polygon mainnet)
+    COLLATERAL_ONRAMP: str = "0x93070a847efEf7F70739046A929D47a521F5B8ee"  # USDC.e → pUSD
+    COLLATERAL_OFFRAMP: str = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854"  # pUSD → USDC.e
+    CTF_EXCHANGE_V2: str = "0xE111180000d2663C0091e4f400237545B87B996B"     # Binary markets
+    NEG_RISK_CTF_EXCHANGE_V2: str = "0xe2222d279d744050d28e00520010520000310F59"  # Multi-outcome
 
     @classmethod
     def validate(cls) -> list[str]:
