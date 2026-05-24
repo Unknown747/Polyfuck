@@ -111,7 +111,8 @@ class MarketScanner:
                 if opp:
                     opportunities.append(opp)
             except Exception as e:
-                # Skip malformed markets silently
+                # BUG FIX: log errors instead of silently swallowing them
+                console.print(f"[dim yellow]Warning: skipped market due to error: {e}[/]")
                 continue
 
         console.print(f"[green]Checked {checked} markets, found {len(opportunities)} opportunities[/]")
@@ -232,9 +233,19 @@ class MarketScanner:
             return None
 
         # Check volume threshold
-        volume_24h = float(market.get("volume24hr", 0) or 0)
-        total_volume = float(market.get("volumeNum", 0) or 0)
-        liquidity = float(market.get("liquidityNum", 0) or 0)
+        # BUG FIX: guard against non-numeric API values that would raise ValueError
+        try:
+            volume_24h = float(market.get("volume24hr", 0) or 0)
+        except (ValueError, TypeError):
+            volume_24h = 0.0
+        try:
+            total_volume = float(market.get("volumeNum", 0) or 0)
+        except (ValueError, TypeError):
+            total_volume = 0.0
+        try:
+            liquidity = float(market.get("liquidityNum", 0) or 0)
+        except (ValueError, TypeError):
+            liquidity = 0.0
 
         if total_volume < min_volume and volume_24h < min_volume * 0.1:
             return None  # Not enough liquidity
@@ -326,14 +337,20 @@ class MarketScanner:
         q1_lower = q1.lower()
         q2_lower = q2.lower()
 
-        # Check for shared substantive keywords (ignore common words)
-        stop_words = {"will", "the", "a", "an", "in", "on", "at", "of", "is", "be", "it", "to", "and", "or", "for"}
-        words1 = set(q1_lower.split()) - stop_words
-        words2 = set(q2_lower.split()) - stop_words
+        # BUG FIX: require >=3 meaningful shared keywords to reduce false positives.
+        # Also filter out short words and generic political terms that appear everywhere.
+        stop_words = {
+            "will", "the", "a", "an", "in", "on", "at", "of", "is", "be", "it",
+            "to", "and", "or", "for", "win", "by", "get", "do", "did", "has",
+            "have", "more", "than", "over", "under", "least", "most", "what",
+            "who", "when", "how", "which", "that", "this", "his", "her", "their",
+        }
+        words1 = {w for w in q1_lower.split() if len(w) > 3} - stop_words
+        words2 = {w for w in q2_lower.split() if len(w) > 3} - stop_words
         overlap = words1 & words2
 
-        if len(overlap) >= 2:
-            return f"Shared concepts: {', '.join(list(overlap)[:3])}"
+        if len(overlap) >= 3:
+            return f"Shared concepts: {', '.join(sorted(overlap)[:3])}"
 
         return None
 

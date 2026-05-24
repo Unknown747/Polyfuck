@@ -129,7 +129,8 @@ def approve_token(w3: Web3, private_key: str, token_address: str, spender: str, 
         "from": account.address,
         "nonce": w3.eth.get_transaction_count(account.address),
         "gas": 100000,
-        "maxFeePerGas": w3.eth.gas_price * 2,
+        # BUG FIX: 2x gas multiplier is too high; use 1.3x for Polygon
+        "maxFeePerGas": int(w3.eth.gas_price * 1.3),
         "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
     })
 
@@ -170,15 +171,22 @@ def swap_usdc_native_to_bridged(amount_usdc: float, private_key: str, dry_run: b
         raise ValueError(f"Insufficient native USDC: have {balances['usdc_native']:.2f}, need {amount_usdc:.2f}")
 
     amount_raw = int(amount_usdc * 1e6)  # 6 decimals
-    min_amount_out = int(amount_usdc * 0.985 * 1e6)  # 1.5% slippage tolerance
+    # BUG FIX: 1.5% slippage is far too high for a stablecoin-to-stablecoin swap.
+    # Use 0.1% max slippage to avoid MEV leakage on Polygon.
+    min_amount_out = int(amount_usdc * 0.999 * 1e6)  # 0.1% slippage tolerance
 
     # Use QuickSwap for the swap (USDC.native → USDC.e pool should exist)
     print(f"\n💱 Swap: {amount_usdc:.2f} USDC.native → USDC.e")
-    print(f"  Minimum output: {min_amount_out / 1e6:.4f} USDC.e (1.5% slippage)")
+    print(f"  Minimum output: {min_amount_out / 1e6:.4f} USDC.e (0.1% slippage)")
+
+    # BUG FIX: define WMATIC at module scope so it's available in all branches.
+    WMATIC = Web3.to_checksum_address("0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270")
 
     # Get quote from QuickSwap
     router_contract = w3.eth.contract(address=QUICKSWAP_ROUTER, abi=QUICKSWAP_ABI)
 
+    quote_path = [USDC_NATIVE, USDC_E]
+    expected_out = 0
     try:
         # Try direct pool: USDC.native → USDC.e
         amounts_out = router_contract.functions.getAmountsOut(
@@ -192,13 +200,13 @@ def swap_usdc_native_to_bridged(amount_usdc: float, private_key: str, dry_run: b
         print("  Trying WMATIC route...")
 
         # Try via WMATIC: USDC.native → WMATIC → USDC.e
-        WMATIC = Web3.to_checksum_address("0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270")
         try:
             amounts_out = router_contract.functions.getAmountsOut(
                 amount_raw,
                 [USDC_NATIVE, WMATIC, USDC_E]
             ).call()
             expected_out = amounts_out[-1]
+            quote_path = [USDC_NATIVE, WMATIC, USDC_E]
             print(f"  QuickSwap WMATIC route quote: {expected_out / 1e6:.4f} USDC.e")
         except Exception as e2:
             raise ValueError(f"Could not find swap route: {e2}")
@@ -211,18 +219,9 @@ def swap_usdc_native_to_bridged(amount_usdc: float, private_key: str, dry_run: b
     print(f"\n1️⃣  Approving USDC.native spend...")
     approve_tx = approve_token(w3, private_key, USDC_NATIVE, QUICKSWAP_ROUTER, amount_raw)
 
-    # Step 2: Execute swap
+    # Step 2: Execute swap using the same path determined during quote
     print(f"\n2️⃣  Executing swap...")
-
-    # Determine path
-    path = [USDC_NATIVE, USDC_E]
-    try:
-        # Verify direct route works
-        router_contract.functions.getAmountsOut(amount_raw, path).call()
-    except Exception:
-        # Fall back to WMATIC route
-        path = [USDC_NATIVE, WMATIC, USDC_E]
-        print("  Using WMATIC route")
+    path = quote_path
 
     deadline = int(time.time()) + 600  # 10 minutes
 
@@ -236,7 +235,8 @@ def swap_usdc_native_to_bridged(amount_usdc: float, private_key: str, dry_run: b
         "from": address,
         "nonce": w3.eth.get_transaction_count(address),
         "gas": 300000,  # Generous gas limit
-        "maxFeePerGas": w3.eth.gas_price * 3,
+        # BUG FIX: 3x gas multiplier is wasteful; 1.3x is sufficient for Polygon
+        "maxFeePerGas": int(w3.eth.gas_price * 1.3),
         "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
     })
 

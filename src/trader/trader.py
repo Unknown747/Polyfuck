@@ -155,11 +155,23 @@ class Trader:
             return None
 
         try:
+            # BUG FIX: Split investment proportionally by price so both sides
+            # produce the same number of shares (delta-neutral arbitrage).
+            # num_pairs = investment / (yes_price + no_price)
+            # yes_cost = num_pairs * yes_price, no_cost = num_pairs * no_price
+            cost_per_pair = opp.yes_price + opp.no_price
+            if cost_per_pair <= 0:
+                console.print("[red]Invalid prices for arbitrage split.[/]")
+                return None
+            num_pairs = investment_usd / cost_per_pair
+            yes_investment = num_pairs * opp.yes_price
+            no_investment = num_pairs * opp.no_price
+
             # Place YES side order
             yes_trade = self._place_order(
                 token_id=opp.yes_token_id,
                 side="BUY",
-                size=investment_usd * 0.5,  # Split investment
+                size=yes_investment,
                 price=opp.yes_price,
                 condition_id=opp.condition_id,
             )
@@ -168,7 +180,7 @@ class Trader:
             no_trade = self._place_order(
                 token_id=opp.no_token_id,
                 side="BUY",
-                size=investment_usd * 0.5,
+                size=no_investment,
                 price=opp.no_price,
                 condition_id=opp.condition_id,
             )
@@ -255,34 +267,32 @@ class Trader:
         order_type: str = "GTC",
     ) -> Trade | None:
         """Place an order on the CLOB."""
-        # Determine size field: BUY = dollar amount, SELL = share count
-        # Convert to the fixed-math format (6 decimal places)
-        maker_amount = str(int(size * 1_000_000))
-        taker_amount = str(int(size * price * 1_000_000)) if side == "BUY" else str(int(size * 1_000_000))
-
-        # Construct the order payload for the CLOB API
-        order_data = {
-            "order": {
-                "maker": self.clob.address,
-                "signer": self.clob.address,
-                "tokenId": token_id,
-                "makerAmount": maker_amount if side == "BUY" else taker_amount,
-                "takerAmount": taker_amount if side == "BUY" else maker_amount,
-                "side": side,
-                "expiration": str(int(time.time()) + 300 + 60),  # 5 min + 60s security threshold
-                "timestamp": str(int(time.time() * 1000)),
-                "metadata": "",
-                "builder": "0x0000000000000000000000000000000000000000",
-                "salt": str(int(time.time() * 1000)),
-            },
-            "orderType": order_type,
-        }
-
-        # Note: In production, we need to sign the order with EIP-712
-        # For now, use py-clob-client-v2 if available, otherwise raw API
+        # Use py-clob-client-v2's create_and_post_order for proper EIP-712 signing.
+        # BUG FIX: use round() before int() to avoid truncation errors in fixed-point math.
         try:
-            response = self.clob.post_order(order_data)
-            console.print(f"[green]Order placed: {response}[/]")
+            from py_clob_client_v2 import OrderArgs, MarketOrderArgs, OrderType, CreateOrderOptions
+
+            if price > 0:
+                # Limit order: size is dollar amount, price determines shares
+                order_args = OrderArgs(
+                    token_id=token_id,
+                    price=round(price, 4),
+                    size=round(size / price, 4),  # Convert dollars → shares
+                    side=side,
+                )
+                options = CreateOrderOptions(tick_size=0.01)
+                ot = OrderType(order_type)
+                response = self.clob.create_and_post_order(order_args, options, ot)
+            else:
+                # Market order (FOK): size is share count
+                order_args = MarketOrderArgs(
+                    token_id=token_id,
+                    amount=round(size, 4),
+                )
+                response = self.clob.create_and_post_order(order_args, None, OrderType.FOK)
+
+            order_id = response.get("orderID", "") if isinstance(response, dict) else ""
+            console.print(f"[green]Order placed: {order_id}[/]")
             return Trade(
                 market_question="",
                 condition_id=condition_id,
@@ -292,7 +302,7 @@ class Trader:
                 size=size,
                 order_type=order_type,
                 status="pending",
-                order_id=response.get("orderID", ""),
+                order_id=order_id,
             )
         except Exception as e:
             console.print(f"[red]Order failed: {e}[/]")

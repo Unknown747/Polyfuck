@@ -83,6 +83,16 @@ def create_wallet() -> dict:
     # Restrict file permissions (owner read/write only)
     KEYS_FILE.chmod(0o600)
 
+    # BUG FIX: warn clearly that the key file is NOT encrypted on disk.
+    # Users must move the private key to config/.env and delete wallet.json.
+    import warnings
+    warnings.warn(
+        f"\n⚠️  SECURITY WARNING: {KEYS_FILE} stores your PRIVATE KEY in PLAINTEXT.\n"
+        "   Copy POLY_PRIVATE_KEY into config/.env, then delete config/keys/wallet.json.\n"
+        "   Never commit this file to version control.",
+        stacklevel=2,
+    )
+
     return wallet_data
 
 
