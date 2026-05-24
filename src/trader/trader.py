@@ -2,7 +2,7 @@
 
 import time
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from rich.console import Console
 
@@ -19,13 +19,15 @@ class Trade:
     market_question: str
     condition_id: str
     token_id: str
-    side: str  # "BUY" or "SELL"
+    side: str        # "BUY" or "SELL"
     price: float
-    size: float  # Number of shares for SELL, dollar amount for BUY
+    size: float      # Shares for SELL, dollar amount for BUY
     order_type: str  # "GTC", "FOK", "GTD"
-    status: str  # "pending", "filled", "partial", "cancelled", "dry_run"
+    status: str      # "pending", "filled", "partial", "cancelled", "dry_run"
     order_id: str = ""
-    timestamp: float = time.time()
+    # BUG FIX: was `timestamp: float = time.time()` — that evaluates ONCE at class
+    # definition time, giving every Trade the same timestamp. Use field() instead.
+    timestamp: float = field(default_factory=time.time)
     filled_price: float = 0.0
     filled_size: float = 0.0
     fee_estimate: float = 0.0
@@ -34,7 +36,7 @@ class Trade:
 class Trader:
     """Executes trades on Polymarket CLOB."""
 
-    # Category fee rates (maker = 0, taker only)
+    # Category taker fee rates (maker = 0)
     TAKER_FEE_RATES = {
         "crypto": 0.07,
         "sports": 0.03,
@@ -50,12 +52,15 @@ class Trader:
         self._trade_log: list[Trade] = []
         self._daily_pnl: float = 0.0
         self._daily_trades: int = 0
+        # BUG FIX: track open positions separately from daily trade count
+        self._open_position_count: int = 0
+        self._total_exposure_usd: float = 0.0
 
     def estimate_fee(self, price: float, size: float, category: str = "crypto") -> float:
         """Estimate taker fee for a trade.
 
-        Formula: fee = C × feeRate × p × (1 - p)
-        where C = shares traded, p = price
+        Formula: fee = C × feeRate × p × (1 − p)
+        where C = shares, p = price
         """
         fee_rate = self.TAKER_FEE_RATES.get(category, 0.04)
         fee = size * fee_rate * price * (1 - price)
@@ -68,9 +73,8 @@ class Trader:
 
         For YES+NO < $1.00: buy both sides for guaranteed profit.
         Each complete pair costs (yes_price + no_price) and pays $1.00 on resolution.
-        Number of pairs = investment / cost_per_pair.
         """
-        cost_per_pair = opp.price_sum  # Total cost to buy 1 YES share + 1 NO share
+        cost_per_pair = opp.price_sum
         if cost_per_pair <= 0:
             return {
                 "investment": investment,
@@ -82,11 +86,8 @@ class Trader:
             }
 
         num_pairs = investment / cost_per_pair
-        guaranteed_return = num_pairs * 1.00  # Each pair resolves to $1.00
+        guaranteed_return = num_pairs * 1.00
 
-        # Estimate fees for each side
-        yes_cost = num_pairs * opp.yes_price
-        no_cost = num_pairs * opp.no_price
         yes_fee = self.estimate_fee(opp.yes_price, num_pairs, category)
         no_fee = self.estimate_fee(opp.no_price, num_pairs, category)
         total_fees = yes_fee + no_fee
@@ -104,40 +105,47 @@ class Trader:
         }
 
     def execute_mispricing_trade(
-        self, opp: Mispricing, investment_usd: float, category: str = "crypto"
+        self, opp: Mispricing, investment_usd: float | None = None, category: str = "crypto"
     ) -> Trade | None:
         """Execute an arbitrage trade on a mispriced market.
 
-        If YES + NO < $1.00: Buy both sides for guaranteed profit.
-        If YES + NO > $1.00: Sell both sides (if we hold positions).
+        If YES + NO < $1.00: Buy both sides for guaranteed profit at resolution.
 
         Args:
-            opp: The mispricing opportunity to trade
-            investment_usd: Dollar amount to invest
+            opp: The mispricing opportunity
+            investment_usd: Dollar amount to invest (defaults to DEFAULT_TRADE_SIZE_USD)
             category: Market category for fee estimation
         """
-        # Safety checks
+        # Use configured default trade size if not specified
+        if investment_usd is None:
+            investment_usd = config.DEFAULT_TRADE_SIZE_USD
+
+        # Cap to max position size
+        investment_usd = min(investment_usd, config.MAX_POSITION_USD)
+
         if not self._check_safety_limits(investment_usd):
             return None
 
-        # Calculate expected profit
         profit_calc = self.calculate_profit_after_fees(opp, investment_usd, category)
 
         if not profit_calc["profitable"]:
-            console.print(f"[red]Trade not profitable after fees: ${profit_calc['net_profit']:.4f}[/]")
+            console.print(
+                f"[red]Trade not profitable after fees: "
+                f"${profit_calc['net_profit']:.4f} net on ${investment_usd:.2f}[/]"
+            )
             return None
 
         console.print(
-            f"[green]Opportunity found:[/] {opp.market_question}\n"
-            f"  Investment: ${investment_usd:.2f} | "
-            f"Est. Profit: ${profit_calc['net_profit']:.4f} ({profit_calc['roi_pct']:.1f}% ROI)\n"
-            f"  Fees: ${profit_calc['total_fees']:.4f}"
+            f"[green]Opportunity:[/] {opp.market_question}\n"
+            f"  Invest: ${investment_usd:.2f} | "
+            f"Est. Profit: ${profit_calc['net_profit']:.4f} "
+            f"({profit_calc['roi_pct']:.1f}% ROI) | "
+            f"Fees: ${profit_calc['total_fees']:.4f}"
         )
 
-        # Dry run mode
         if config.DRY_RUN:
             console.print(f"[yellow]DRY RUN: Would place trade on {opp.market_question}[/]")
-            return Trade(
+            trade = Trade(
                 market_question=opp.market_question,
                 condition_id=opp.condition_id,
                 token_id=opp.yes_token_id,
@@ -148,26 +156,28 @@ class Trader:
                 status="dry_run",
                 fee_estimate=profit_calc["total_fees"],
             )
+            self._trade_log.append(trade)
+            self._daily_trades += 1
+            self._open_position_count += 1
+            self._total_exposure_usd += investment_usd
+            return trade
 
-        # Live trading
         if not self.clob._authenticated:
             console.print("[red]Not authenticated. Call authenticate() first.[/]")
             return None
 
         try:
-            # BUG FIX: Split investment proportionally by price so both sides
-            # produce the same number of shares (delta-neutral arbitrage).
-            # num_pairs = investment / (yes_price + no_price)
-            # yes_cost = num_pairs * yes_price, no_cost = num_pairs * no_price
+            # Split investment proportionally by price so both sides produce
+            # the same number of shares (delta-neutral arbitrage).
             cost_per_pair = opp.yes_price + opp.no_price
             if cost_per_pair <= 0:
                 console.print("[red]Invalid prices for arbitrage split.[/]")
                 return None
+
             num_pairs = investment_usd / cost_per_pair
             yes_investment = num_pairs * opp.yes_price
             no_investment = num_pairs * opp.no_price
 
-            # Place YES side order
             yes_trade = self._place_order(
                 token_id=opp.yes_token_id,
                 side="BUY",
@@ -176,7 +186,6 @@ class Trader:
                 condition_id=opp.condition_id,
             )
 
-            # Place NO side order
             no_trade = self._place_order(
                 token_id=opp.no_token_id,
                 side="BUY",
@@ -186,21 +195,28 @@ class Trader:
             )
 
             if yes_trade and no_trade:
+                yes_trade.market_question = opp.market_question
+                yes_trade.fee_estimate = profit_calc["total_fees"]
+                self._trade_log.append(yes_trade)
                 self._daily_pnl -= investment_usd
                 self._daily_trades += 1
-                console.print(f"[bold green]✅ Trade executed![/] YES order: {yes_trade.order_id}, NO order: {no_trade.order_id}")
+                self._open_position_count += 1
+                self._total_exposure_usd += investment_usd
+                console.print(
+                    f"[bold green]✅ Trade executed![/] "
+                    f"YES: {yes_trade.order_id} | NO: {no_trade.order_id}"
+                )
                 return yes_trade
 
         except Exception as e:
             console.print(f"[red]Trade failed: {e}[/]")
-            return None
 
         return None
 
     def close_position(self, token_id: str, size: float, condition_id: str) -> Trade | None:
         """Close a position by selling shares."""
         if config.DRY_RUN:
-            console.print(f"[yellow]DRY RUN: Would close position on {token_id[:10]}...[/]")
+            console.print(f"[yellow]DRY RUN: Would close position {token_id[:10]}...[/]")
             return Trade(
                 market_question="Close position",
                 condition_id=condition_id,
@@ -217,24 +233,32 @@ class Trader:
             return None
 
         try:
-            return self._place_order(
+            result = self._place_order(
                 token_id=token_id,
                 side="SELL",
                 size=size,
-                price=0.0,  # Market order
+                price=0.0,
                 condition_id=condition_id,
                 order_type="FOK",
             )
+            if result:
+                self._open_position_count = max(0, self._open_position_count - 1)
+            return result
         except Exception as e:
             console.print(f"[red]Close position failed: {e}[/]")
             return None
+
+    def record_redemption(self, amount_usd: float) -> None:
+        """Record that a redemption added funds back to the account."""
+        self._daily_pnl += amount_usd
+        self._open_position_count = max(0, self._open_position_count - 1)
+        self._total_exposure_usd = max(0.0, self._total_exposure_usd - amount_usd)
 
     def cancel_all(self) -> bool:
         """Cancel all open orders."""
         if config.DRY_RUN:
             console.print("[yellow]DRY RUN: Would cancel all orders[/]")
             return True
-
         try:
             self.clob.cancel_all_orders()
             console.print("[green]All orders cancelled.[/]")
@@ -244,14 +268,14 @@ class Trader:
             return False
 
     def get_trade_history(self) -> list[Trade]:
-        """Return logged trade history."""
         return self._trade_log.copy()
 
     def get_daily_summary(self) -> dict:
-        """Return daily trading summary."""
         return {
             "daily_pnl": self._daily_pnl,
             "daily_trades": self._daily_trades,
+            "open_positions": self._open_position_count,
+            "total_exposure_usd": self._total_exposure_usd,
             "trade_log": self._trade_log,
         }
 
@@ -266,33 +290,36 @@ class Trader:
         condition_id: str,
         order_type: str = "GTC",
     ) -> Trade | None:
-        """Place an order on the CLOB."""
-        # Use py-clob-client-v2's create_and_post_order for proper EIP-712 signing.
-        # BUG FIX: use round() before int() to avoid truncation errors in fixed-point math.
+        """Place an order on the CLOB using EIP-712 signing."""
         try:
             from py_clob_client_v2 import OrderArgs, MarketOrderArgs, OrderType, CreateOrderOptions
 
             if price > 0:
-                # Limit order: size is dollar amount, price determines shares
+                # Limit order: size is dollar amount → convert to shares
+                # BUG FIX: use round() before conversion to avoid fixed-point truncation
+                shares = round(size / price, 4)
                 order_args = OrderArgs(
                     token_id=token_id,
                     price=round(price, 4),
-                    size=round(size / price, 4),  # Convert dollars → shares
+                    size=shares,
                     side=side,
                 )
                 options = CreateOrderOptions(tick_size=0.01)
-                ot = OrderType(order_type)
-                response = self.clob.create_and_post_order(order_args, options, ot)
+                response = self.clob._client.create_and_post_order(
+                    order_args, options, OrderType(order_type)
+                )
             else:
                 # Market order (FOK): size is share count
                 order_args = MarketOrderArgs(
                     token_id=token_id,
                     amount=round(size, 4),
                 )
-                response = self.clob.create_and_post_order(order_args, None, OrderType.FOK)
+                response = self.clob._client.create_and_post_order(
+                    order_args, None, OrderType.FOK
+                )
 
             order_id = response.get("orderID", "") if isinstance(response, dict) else ""
-            console.print(f"[green]Order placed: {order_id}[/]")
+            console.print(f"[green]Order placed: {order_id or '(pending)'}[/]")
             return Trade(
                 market_question="",
                 condition_id=condition_id,
@@ -309,30 +336,36 @@ class Trader:
             return None
 
     def _check_safety_limits(self, investment_usd: float) -> bool:
-        """Check if trade is within safety limits."""
-        # Check max position size
+        """Check if a new trade is within all safety limits."""
         if investment_usd > config.MAX_POSITION_USD:
             console.print(
-                f"[red]Position size ${investment_usd:.2f} exceeds max ${config.MAX_POSITION_USD:.2f}[/]"
+                f"[red]Position ${investment_usd:.2f} > max ${config.MAX_POSITION_USD:.2f}[/]"
             )
             return False
 
-        # Check daily loss limit
         if abs(self._daily_pnl) > config.MAX_DAILY_LOSS_USD:
             console.print(
-                f"[red]Daily loss ${abs(self._daily_pnl):.2f} exceeds limit ${config.MAX_DAILY_LOSS_USD:.2f}[/]"
+                f"[red]Daily loss ${abs(self._daily_pnl):.2f} > "
+                f"limit ${config.MAX_DAILY_LOSS_USD:.2f} — trading halted[/]"
             )
             return False
 
-        # Check max open positions
-        if self._daily_trades >= config.MAX_OPEN_POSITIONS:
+        # BUG FIX: was checking _daily_trades (trade count) instead of actual
+        # open position count, allowing far too many concurrent positions.
+        if self._open_position_count >= config.MAX_OPEN_POSITIONS:
             console.print(
                 f"[red]Max open positions ({config.MAX_OPEN_POSITIONS}) reached[/]"
             )
             return False
 
-        # Check minimum edge
+        if self._total_exposure_usd + investment_usd > config.MAX_TOTAL_EXPOSURE_USD:
+            console.print(
+                f"[red]Adding ${investment_usd:.2f} would exceed "
+                f"max total exposure ${config.MAX_TOTAL_EXPOSURE_USD:.2f}[/]"
+            )
+            return False
+
         if config.DRY_RUN:
-            console.print(f"[yellow]✓ Safety checks passed (DRY RUN mode)[/]")
+            console.print("[dim green]✓ Safety checks passed (DRY RUN)[/]")
 
         return True

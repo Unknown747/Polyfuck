@@ -13,10 +13,7 @@ try:
 except ImportError:
     HAS_FERNET = False
 
-# Polygon mainnet chain ID
 CHAIN_ID = 137
-
-# Key store location
 KEYS_DIR = Path(__file__).parent.parent.parent / "config" / "keys"
 KEYS_FILE = KEYS_DIR / "wallet.json"
 ENCRYPTED_FILE = KEYS_DIR / "wallet.enc"
@@ -24,7 +21,7 @@ KEYCHAIN_SERVICE = "clawbots-wallet-key"
 
 
 def _get_keychain_key() -> str | None:
-    """Retrieve encryption key from macOS Keychain."""
+    """Retrieve encryption key from macOS Keychain (local dev only)."""
     try:
         result = subprocess.run(
             ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
@@ -41,15 +38,12 @@ def _decrypt_wallet() -> dict | None:
     """Load and decrypt wallet from wallet.enc using Keychain key."""
     if not ENCRYPTED_FILE.exists() or not HAS_FERNET:
         return None
-
     key = _get_keychain_key()
     if not key:
         return None
-
     try:
         with open(ENCRYPTED_FILE) as f:
             enc_data = json.load(f)
-
         fernet = Fernet(key.encode())
         decrypted = fernet.decrypt(enc_data["encrypted"].encode()).decode()
         return json.loads(decrypted)
@@ -58,12 +52,11 @@ def _decrypt_wallet() -> dict | None:
 
 
 def create_wallet() -> dict:
-    """Create a new random Polygon wallet and save it securely.
+    """Create a new random Polygon wallet.
 
-    Returns:
-        dict with 'address', 'private_key', 'mnemonic' (if available)
+    IMPORTANT: After generating, copy POLY_PRIVATE_KEY into Replit Secrets
+    and never store the private key in files that could be committed to git.
     """
-    # Generate a new account
     Account.enable_unaudited_hdwallet_features()
     account, mnemonic = Account.create_with_mnemonic()
 
@@ -75,43 +68,30 @@ def create_wallet() -> dict:
         "created_at": __import__("datetime").datetime.now().isoformat(),
     }
 
-    # Save to file with restricted permissions
     KEYS_DIR.mkdir(parents=True, exist_ok=True)
     with open(KEYS_FILE, "w") as f:
         json.dump(wallet_data, f, indent=2)
-
-    # Restrict file permissions (owner read/write only)
     KEYS_FILE.chmod(0o600)
 
-    # BUG FIX: warn clearly that the key file is NOT encrypted on disk.
-    # Users must move the private key to config/.env and delete wallet.json.
-    import warnings
-    warnings.warn(
-        f"\n⚠️  SECURITY WARNING: {KEYS_FILE} stores your PRIVATE KEY in PLAINTEXT.\n"
-        "   Copy POLY_PRIVATE_KEY into config/.env, then delete config/keys/wallet.json.\n"
-        "   Never commit this file to version control.",
-        stacklevel=2,
+    print(
+        "\n⚠️  SECURITY: Copy the private key below into Replit Secrets as "
+        "POLY_PRIVATE_KEY, then delete config/keys/wallet.json.\n"
+        "Never commit wallet.json to git.\n"
     )
-
     return wallet_data
 
 
 def load_wallet() -> dict:
-    """Load wallet from key store (encrypted or plain JSON).
-
-    Returns:
-        dict with 'address', 'private_key', etc.
-    """
-    # Try encrypted wallet first (wallet.enc + Keychain)
+    """Load wallet from key store (encrypted or plain JSON)."""
     wallet = _decrypt_wallet()
     if wallet:
         return wallet
 
-    # Fall back to plain JSON wallet
     if not KEYS_FILE.exists():
         raise FileNotFoundError(
             f"No wallet found at {KEYS_FILE} or {ENCRYPTED_FILE}. "
-            f"Run 'python -m src.wallet.create_wallet' first."
+            "Run 'python -m src.wallet.wallet' to create one, then add "
+            "POLY_PRIVATE_KEY to Replit Secrets."
         )
 
     with open(KEYS_FILE) as f:
@@ -127,8 +107,7 @@ def sign_message(private_key: str, message: str) -> str:
 
 def get_address_from_key(private_key: str) -> str:
     """Derive the Ethereum address from a private key."""
-    account = Account.from_key(private_key)
-    return account.address
+    return Account.from_key(private_key).address
 
 
 def validate_private_key(key: str) -> bool:
@@ -148,15 +127,13 @@ def wallet_summary(wallet: dict) -> str:
     """Return a safe summary string for logging (no private key)."""
     return (
         f"Wallet: {wallet['address']}\n"
-        f"Chain: Polygon ({wallet['chain_id']})\n"
+        f"Chain: Polygon (chain ID {wallet['chain_id']})\n"
         f"Created: {wallet['created_at']}\n"
-        f"⚠️  Fund this address with USDC on Polygon to start trading."
+        f"⚠️  Fund with USDC on Polygon to start trading."
     )
 
 
 if __name__ == "__main__":
-    import sys
-
     if ENCRYPTED_FILE.exists() or KEYS_FILE.exists():
         print("Loading existing wallet...")
         wallet = load_wallet()
@@ -167,12 +144,10 @@ if __name__ == "__main__":
     print()
     print(wallet_summary(wallet))
     print()
-    print(f"Private Key: {wallet['private_key'][:8]}...{wallet['private_key'][-6:]}")
-    print(f"Mnemonic: {'Saved in wallet file' if 'mnemonic' in wallet else 'N/A'}")
-    print()
-    print(f"✅ Wallet loaded from: {ENCRYPTED_FILE if ENCRYPTED_FILE.exists() else KEYS_FILE}")
+    pk = wallet["private_key"]
+    print(f"Private Key: {pk[:8]}...{pk[-6:]}")
     print()
     print("Next steps:")
-    print("1. Add POLY_PRIVATE_KEY to config/.env (or use encrypted wallet)")
-    print("2. Fund your wallet with USDC on Polygon network")
-    print("3. Run the bot in dry-run mode first: python -m src.bot --dry-run")
+    print("1. Add POLY_PRIVATE_KEY to Replit Secrets (Tools → Secrets)")
+    print("2. Fund your wallet with USDC on Polygon")
+    print("3. Run in dry-run mode first: python -m src.bot --dry-run")

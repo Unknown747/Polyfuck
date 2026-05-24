@@ -1,4 +1,4 @@
-"""Position tracking and P&L management."""
+"""Position tracking, P&L management, and resolved-market detection."""
 
 import json
 import time
@@ -15,10 +15,10 @@ console = Console()
 
 @dataclass
 class Position:
-    """An open position on Polymarket."""
+    """An open or redeemable position on Polymarket."""
     condition_id: str
     title: str
-    outcome: str  # "Yes" or "No"
+    outcome: str       # "Yes" or "No"
     size: float
     avg_price: float
     current_price: float
@@ -40,6 +40,11 @@ class Position:
     def roi_pct(self) -> float:
         return self.percent_pnl
 
+    @property
+    def is_resolved_winner(self) -> bool:
+        """True when the market resolved and this is the winning side (price ≈ 1.0)."""
+        return self.is_redeemable and self.current_price >= 0.99
+
     def to_dict(self) -> dict:
         return {
             "condition_id": self.condition_id,
@@ -52,11 +57,12 @@ class Position:
             "current_value": self.current_value,
             "cash_pnl": self.cash_pnl,
             "percent_pnl": self.percent_pnl,
+            "is_redeemable": self.is_redeemable,
         }
 
 
 class PositionTracker:
-    """Tracks open positions and calculates P&L."""
+    """Tracks open positions, calculates P&L, and surfaces redeemable markets."""
 
     def __init__(self, address: str, data_client: DataClient | None = None):
         self.address = address
@@ -65,14 +71,16 @@ class PositionTracker:
         self._last_refresh: float = 0
 
     def refresh_positions(self, force: bool = False) -> list[Position]:
-        """Fetch current positions from Polymarket Data API."""
-        # Cache for 60 seconds
+        """Fetch current positions from Polymarket Data API.
+
+        Results are cached for 60 seconds. Pass force=True to bypass.
+        """
         if not force and time.time() - self._last_refresh < 60 and self._position_cache:
             return list(self._position_cache.values())
 
         try:
             raw_positions = self.data.get_positions(self.address, limit=500)
-            positions = []
+            positions: list[Position] = []
 
             for p in raw_positions:
                 try:
@@ -93,11 +101,9 @@ class PositionTracker:
                         is_redeemable=bool(p.get("redeemable", False)),
                         is_mergeable=bool(p.get("mergeable", False)),
                     )
-
                     if pos.size > 0:
                         positions.append(pos)
                         self._position_cache[pos.condition_id] = pos
-
                 except (ValueError, TypeError) as e:
                     console.print(f"[yellow]Skipping malformed position: {e}[/]")
                     continue
@@ -108,6 +114,11 @@ class PositionTracker:
         except Exception as e:
             console.print(f"[red]Error fetching positions: {e}[/]")
             return list(self._position_cache.values())
+
+    def get_redeemable_positions(self, force: bool = False) -> list[Position]:
+        """Return positions in resolved markets that are ready to redeem."""
+        positions = self.refresh_positions(force=force)
+        return [p for p in positions if p.is_redeemable and p.size > 0]
 
     def get_portfolio_value(self) -> dict:
         """Get total portfolio value and P&L."""
@@ -137,21 +148,21 @@ class PositionTracker:
     def save_snapshot(self, filepath: str = "logs/positions_snapshot.json") -> None:
         """Save current positions to a JSON file."""
         positions = self.refresh_positions(force=True)
+        redeemable = self.get_redeemable_positions()
         data = {
             "timestamp": time.time(),
             "address": self.address,
             "positions": [p.to_dict() for p in positions],
+            "redeemable_count": len(redeemable),
             "portfolio": self.get_portfolio_value(),
         }
-
         Path(filepath).parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, "w") as f:
             json.dump(data, f, indent=2, default=str)
-
         console.print(f"[green]Position snapshot saved to {filepath}[/]")
 
     def display_positions(self, positions: list[Position] | None = None) -> None:
-        """Display positions in a rich table."""
+        """Display open positions in a Rich table, highlighting redeemable ones."""
         if positions is None:
             positions = self.refresh_positions(force=True)
 
@@ -162,18 +173,25 @@ class PositionTracker:
         table = Table(title="📊 Open Positions")
         table.add_column("Market", style="cyan", max_width=40, no_wrap=True)
         table.add_column("Side", justify="center")
-        table.add_column("Size", justify="right")
-        table.add_column("Avg Price", justify="right")
-        table.add_column("Current", justify="right")
+        table.add_column("Shares", justify="right")
+        table.add_column("Avg $", justify="right")
+        table.add_column("Cur $", justify="right")
         table.add_column("Value", justify="right")
         table.add_column("P&L", justify="right")
         table.add_column("ROI", justify="right")
+        table.add_column("", justify="center")  # flags
 
         total_value = 0.0
         total_pnl = 0.0
 
         for pos in positions:
             pnl_style = "green" if pos.cash_pnl >= 0 else "red"
+            flags = ""
+            if pos.is_redeemable:
+                flags += "🔄"
+            if pos.is_mergeable:
+                flags += "🔀"
+
             table.add_row(
                 pos.title[:40],
                 pos.outcome,
@@ -183,12 +201,18 @@ class PositionTracker:
                 f"${pos.current_value:.2f}",
                 f"[{pnl_style}]${pos.cash_pnl:+.2f}[/{pnl_style}]",
                 f"[{pnl_style}]{pos.percent_pnl:+.1f}%[/{pnl_style}]",
+                flags,
             )
             total_value += pos.current_value
             total_pnl += pos.cash_pnl
 
         console.print(table)
-        console.print(
+
+        redeemable_count = sum(1 for p in positions if p.is_redeemable)
+        summary = (
             f"\n[bold]Total Value:[/] ${total_value:.2f} | "
             f"[bold]Total P&L:[/] ${total_pnl:+.2f}"
         )
+        if redeemable_count:
+            summary += f" | [bold yellow]🔄 {redeemable_count} redeemable[/]"
+        console.print(summary)

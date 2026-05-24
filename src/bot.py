@@ -1,4 +1,4 @@
-"""Main bot orchestration - scanner → analyzer → executor loop."""
+"""Main bot orchestration — scanner → trader → redeemer loop."""
 
 import sys
 import time
@@ -16,6 +16,7 @@ from src.wallet.wallet import load_wallet, validate_private_key
 from src.scanner.scanner import MarketScanner, Mispricing, display_opportunities
 from src.trader.trader import Trader
 from src.positions.positions import PositionTracker
+from src.redemption.redemption import AutoRedeemer
 
 console = Console()
 
@@ -35,7 +36,7 @@ logger = logging.getLogger("polymarket-bot")
 
 
 class PolymarketBot:
-    """Main bot controller - orchestrates scanning, analysis, and trading."""
+    """Main bot controller — orchestrates scanning, trading, and redemption."""
 
     def __init__(self, dry_run: bool | None = None):
         self.dry_run = dry_run if dry_run is not None else config.DRY_RUN
@@ -50,25 +51,30 @@ class PolymarketBot:
         self.scanner = MarketScanner(self.gamma, self.clob)
         self.trader = Trader(self.clob)
         self.positions: PositionTracker | None = None
+        self.redeemer: AutoRedeemer | None = None
 
         # Stats
         self._scan_count = 0
         self._opportunities_found = 0
         self._trades_executed = 0
+        self._total_redeemed_usd = 0.0
 
     def start(self) -> None:
         """Start the bot."""
         console.print(Panel.fit(
             "[bold cyan]🔫 ClawBots Polymarket Bot[/]\n"
             f"Mode: {'🔍 DRY RUN (no real trades)' if self.dry_run else '⚡ LIVE TRADING'}\n"
-            f"Max Position: ${config.MAX_POSITION_USD:.0f}\n"
-            f"Daily Loss Limit: ${config.MAX_DAILY_LOSS_USD:.0f}\n"
-            f"Min Edge: {config.MIN_EDGE_PCT:.1f}%\n"
+            f"Capital Config: ${config.DEFAULT_TRADE_SIZE_USD:.0f} per trade "
+            f"/ ${config.MAX_POSITION_USD:.0f} max position\n"
+            f"Daily Loss Limit: ${config.MAX_DAILY_LOSS_USD:.0f} "
+            f"/ Max Exposure: ${config.MAX_TOTAL_EXPOSURE_USD:.0f}\n"
+            f"Min Edge: {config.MIN_EDGE_PCT:.1f}% | "
+            f"Max Positions: {config.MAX_OPEN_POSITIONS}\n"
+            f"Auto-Redeem: {'✅ ON' if config.AUTO_REDEEM else '❌ OFF'}\n"
             f"Categories: {', '.join(config.SCAN_CATEGORIES)}",
             title="Starting Bot",
         ))
 
-        # Validate config
         errors = Config.validate()
         if errors and not self.dry_run:
             for err in errors:
@@ -80,18 +86,28 @@ class PolymarketBot:
         if not self.dry_run and config.PRIVATE_KEY:
             self._authenticate()
 
-        # Set up position tracker
+        # Set up position tracker and redeemer
         if config.PRIVATE_KEY:
             from src.wallet.wallet import get_address_from_key
             address = get_address_from_key(config.PRIVATE_KEY)
             self.positions = PositionTracker(address, self.data)
+            self.redeemer = AutoRedeemer(
+                address=address,
+                private_key=config.PRIVATE_KEY,
+                tracker=self.positions,
+            )
 
         # Register signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
         self.running = True
-        logger.info("Bot started in %s mode", "DRY RUN" if self.dry_run else "LIVE")
+        logger.info(
+            "Bot started in %s mode | trade_size=$%.2f max_pos=$%.2f",
+            "DRY RUN" if self.dry_run else "LIVE",
+            config.DEFAULT_TRADE_SIZE_USD,
+            config.MAX_POSITION_USD,
+        )
 
         try:
             self._run_loop()
@@ -106,59 +122,63 @@ class PolymarketBot:
     def scan_once(self, min_edge: float | None = None) -> list[Mispricing]:
         """Run a single scan and return opportunities."""
         edge = min_edge or config.MIN_EDGE_PCT
-        opportunities = self.scanner.scan_all(
+        return self.scanner.scan_all(
             min_edge_pct=edge,
-            min_volume=1000.0,
+            min_volume=config.MIN_MARKET_VOLUME,
             categories=config.SCAN_CATEGORIES,
         )
-        return opportunities
 
     def _authenticate(self) -> None:
         """Authenticate with Polymarket CLOB API."""
         try:
             console.print("[cyan]Authenticating with Polymarket...[/]")
-            creds = self.clob.authenticate(config.PRIVATE_KEY)
-            console.print(f"[green]✅ Authenticated as {self.clob.address[:10]}...{self.clob.address[-6:]}[/]")
+            self.clob.authenticate(config.PRIVATE_KEY)
+            short = self.clob.address
+            console.print(f"[green]✅ Authenticated as {short[:10]}...{short[-6:]}[/]")
         except Exception as e:
             console.print(f"[red]Authentication failed: {e}[/]")
             sys.exit(1)
 
     def _run_loop(self) -> None:
-        """Main bot loop."""
+        """Main bot loop: scan → trade → redeem → repeat."""
         while self.running:
             self._scan_count += 1
             console.print(f"\n[bold cyan]── Scan #{self._scan_count} ──[/]")
 
             try:
-                # 1. Scan for opportunities
+                # 1. Scan for mispricing opportunities
                 opportunities = self.scan_once()
 
                 if opportunities:
                     self._opportunities_found += len(opportunities)
                     display_opportunities(opportunities)
 
-                    # 2. Try to trade the best opportunity
                     best = opportunities[0]
-                    profit_calc = self.trader.calculate_profit_after_fees(best, 10.0)  # $10 default
+                    profit_calc = self.trader.calculate_profit_after_fees(
+                        best, config.DEFAULT_TRADE_SIZE_USD
+                    )
                     console.print(
                         f"\n[bold]Best opportunity:[/] {best.market_question}\n"
-                        f"  Edge: {best.edge_pct:.2f}% | Est. profit: ${profit_calc['net_profit']:.4f}"
+                        f"  Edge: {best.edge_pct:.2f}% | "
+                        f"Est. profit: ${profit_calc['net_profit']:.4f} "
+                        f"({profit_calc['roi_pct']:.1f}% ROI)"
                     )
 
-                    if self.dry_run:
-                        console.print("[yellow]DRY RUN: Would trade this opportunity.[/]")
-                        self.trader.execute_mispricing_trade(best, 10.0)
-                    elif profit_calc["profitable"]:
-                        trade = self.trader.execute_mispricing_trade(
-                            best, min(config.MAX_POSITION_USD, 10.0)
-                        )
+                    # Execute trade (dry-run or live, both go through the same path)
+                    if profit_calc["profitable"]:
+                        trade = self.trader.execute_mispricing_trade(best)
                         if trade:
                             self._trades_executed += 1
+                    else:
+                        console.print(
+                            f"[yellow]Skipping — edge {best.edge_pct:.2f}% not "
+                            f"profitable after fees.[/]"
+                        )
 
-                    # 3. Also check for correlated arb
-                    if self._scan_count % 5 == 0:  # Every 5th scan
+                    # Every 5th scan: also check cross-market correlations
+                    if self._scan_count % 5 == 0:
                         corrs = self.scanner.scan_correlated()
-                        for corr in corrs[:3]:  # Top 3
+                        for corr in corrs[:3]:
                             console.print(
                                 f"  [magenta]Correlation:[/] {corr.description} "
                                 f"({corr.edge_pct:.1f}% edge)"
@@ -166,54 +186,92 @@ class PolymarketBot:
                 else:
                     console.print("[dim]No opportunities found. Waiting...[/]")
 
-                # 4. Check positions
-                if self.positions and self._scan_count % 3 == 0:
-                    positions = self.positions.refresh_positions()
-                    if positions:
-                        self.positions.display_positions(positions)
+                # 2. Auto-redeem resolved positions every N scans
+                if (
+                    config.AUTO_REDEEM
+                    and self.redeemer
+                    and self._scan_count % config.REDEEM_CHECK_INTERVAL == 0
+                ):
+                    self._run_redemption()
 
-                # 5. Show status
+                # 3. Show open positions every 3 scans
+                if self.positions and self._scan_count % 3 == 0:
+                    current = self.positions.refresh_positions()
+                    if current:
+                        self.positions.display_positions(current)
+
+                # 4. Show status summary
                 self._show_status()
 
             except Exception as e:
-                logger.error(f"Scan error: {e}", exc_info=True)
-                console.print(f"[red]Error: {e}[/]")
+                logger.error("Scan error: %s", e, exc_info=True)
+                console.print(f"[red]Error in scan loop: {e}[/]")
 
-            # Wait before next scan
             console.print(f"[dim]Next scan in {config.SCAN_INTERVAL_SEC}s...[/]")
             time.sleep(config.SCAN_INTERVAL_SEC)
 
+    def _run_redemption(self) -> None:
+        """Check for and process redeemable positions."""
+        try:
+            results = self.redeemer.run()
+            for r in results:
+                if r.succeeded and r.estimated_usdc > 0:
+                    self._total_redeemed_usd += r.estimated_usdc
+                    # Notify trader so it updates exposure tracking
+                    self.trader.record_redemption(r.estimated_usdc)
+        except Exception as e:
+            logger.error("Redemption check failed: %s", e, exc_info=True)
+            console.print(f"[red]Auto-redemption error: {e}[/]")
+
     def _show_status(self) -> None:
         """Show bot status summary."""
+        daily = self.trader.get_daily_summary()
         console.print(
             f"\n[bold]── Status ──[/]\n"
-            f"  Scans: {self._scan_count}\n"
-            f"  Opportunities: {self._opportunities_found}\n"
-            f"  Trades: {self._trades_executed}\n"
-            f"  Mode: {'DRY RUN' if self.dry_run else 'LIVE'}"
+            f"  Scans: {self._scan_count} | "
+            f"Opportunities: {self._opportunities_found} | "
+            f"Trades: {self._trades_executed}\n"
+            f"  Open positions: {daily['open_positions']} / {config.MAX_OPEN_POSITIONS} | "
+            f"Exposure: ${daily['total_exposure_usd']:.2f} / "
+            f"${config.MAX_TOTAL_EXPOSURE_USD:.2f}\n"
+            f"  Daily P&L: ${daily['daily_pnl']:+.2f} | "
+            f"Redeemed: ${self._total_redeemed_usd:.2f} | "
+            f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}"
         )
 
     def _signal_handler(self, signum, frame) -> None:
-        """Handle shutdown signals."""
-        console.print(f"\n[yellow]Received signal {signum}, shutting down...[/]")
+        console.print(f"\n[yellow]Signal {signum} received, shutting down...[/]")
         self.running = False
 
     def _shutdown(self) -> None:
-        """Clean shutdown."""
-        # Cancel all open orders if live trading
+        """Clean shutdown — cancel orders, save snapshot."""
         if not self.dry_run and self.clob._authenticated:
             try:
                 self.trader.cancel_all()
             except Exception:
                 pass
 
-        # Save position snapshot
+        # Run a final redemption pass on shutdown
+        if config.AUTO_REDEEM and self.redeemer:
+            try:
+                self._run_redemption()
+            except Exception:
+                pass
+
         if self.positions:
             self.positions.save_snapshot()
 
+        daily = self.trader.get_daily_summary()
         console.print("[bold green]Bot shut down cleanly.[/]")
-        logger.info("Bot shut down. Scans: %d, Opportunities: %d, Trades: %d",
-                    self._scan_count, self._opportunities_found, self._trades_executed)
+        logger.info(
+            "Shutdown. Scans: %d | Opportunities: %d | Trades: %d | "
+            "Daily P&L: $%.2f | Redeemed: $%.2f",
+            self._scan_count,
+            self._opportunities_found,
+            self._trades_executed,
+            daily["daily_pnl"],
+            self._total_redeemed_usd,
+        )
 
 
 def main():
@@ -221,26 +279,39 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="ClawBots Polymarket Bot 🔫🧬")
-    parser.add_argument("--dry-run", action="store_true", default=True,
-                        help="Simulate trades without executing (default: True)")
-    parser.add_argument("--live", action="store_true",
-                        help="Enable live trading with real money")
-    parser.add_argument("--scan", action="store_true",
-                        help="Run a single scan and exit")
-    parser.add_argument("--positions", action="store_true",
-                        help="Show current positions and exit")
-    parser.add_argument("--min-edge", type=float, default=None,
-                        help="Override minimum edge %% for scanning")
+    parser.add_argument(
+        "--dry-run", action="store_true", default=True,
+        help="Simulate trades without executing (default: True)"
+    )
+    parser.add_argument(
+        "--live", action="store_true",
+        help="Enable live trading with real money"
+    )
+    parser.add_argument(
+        "--scan", action="store_true",
+        help="Run a single scan and exit"
+    )
+    parser.add_argument(
+        "--positions", action="store_true",
+        help="Show current positions and exit"
+    )
+    parser.add_argument(
+        "--redeem", action="store_true",
+        help="Check and redeem all resolvable positions, then exit"
+    )
+    parser.add_argument(
+        "--min-edge", type=float, default=None,
+        help="Override minimum edge %% for scanning"
+    )
 
     args = parser.parse_args()
-
-    # Safety: default to dry-run, require explicit --live for real trading
     dry_run = not args.live
 
     if args.live:
-        console.print("[bold red]⚠️  LIVE TRADING MODE - REAL MONEY AT RISK ⚠️[/]")
+        console.print("[bold red]⚠️  LIVE TRADING MODE — REAL MONEY AT RISK ⚠️[/]")
         if not config.is_configured():
-            console.print("[red]Wallet not configured. Set POLY_PRIVATE_KEY in config/.env[/]")
+            for err in Config.validate():
+                console.print(f"[red]{err}[/]")
             sys.exit(1)
 
     bot = PolymarketBot(dry_run=dry_run)
@@ -252,12 +323,25 @@ def main():
 
     if args.positions:
         if not config.PRIVATE_KEY:
-            console.print("[red]Set POLY_PRIVATE_KEY in config/.env to view positions[/]")
+            console.print("[red]Set POLY_PRIVATE_KEY in Replit Secrets to view positions.[/]")
             sys.exit(1)
         from src.wallet.wallet import get_address_from_key
         address = get_address_from_key(config.PRIVATE_KEY)
-        tracker = PositionTracker(address)
+        tracker = PositionTracker(address, DataClient())
         tracker.display_positions()
+        return
+
+    if args.redeem:
+        if not config.PRIVATE_KEY:
+            console.print("[red]Set POLY_PRIVATE_KEY in Replit Secrets to redeem.[/]")
+            sys.exit(1)
+        from src.wallet.wallet import get_address_from_key
+        address = get_address_from_key(config.PRIVATE_KEY)
+        tracker = PositionTracker(address, DataClient())
+        redeemer = AutoRedeemer(address=address, private_key=config.PRIVATE_KEY, tracker=tracker)
+        results = redeemer.run()
+        total = sum(r.estimated_usdc for r in results if r.succeeded)
+        console.print(f"\n[bold green]Total redeemable: ${total:.2f} USDC[/]")
         return
 
     bot.start()
