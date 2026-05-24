@@ -1,0 +1,15 @@
+.env
+config/.env
+config/keys/
+config/keys/*.enc
+config/keys/*.json
+logs/
+*.pyc
+__pycache__/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.DS_Store__pycache__/
