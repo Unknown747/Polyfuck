@@ -64,7 +64,17 @@ class Config:
 
     # === Polygon chain ===
     CHAIN_ID: int = 137
-    RPC_URL: str = os.getenv("POLYGON_RPC_URL", "https://polygon-rpc.com")
+    # BUG FIX: polygon-rpc.com is unreachable from Replit servers.
+    # polygon.drpc.org is the most reliable public RPC from cloud environments.
+    RPC_URL: str = os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org")
+
+    # Ordered fallback list — tried in sequence if primary RPC fails
+    RPC_FALLBACKS: list[str] = [
+        os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org"),
+        "https://polygon-mainnet.public.blastapi.io",
+        "https://rpc-mainnet.maticvigil.com",
+        "https://polygon-bor-rpc.publicnode.com",
+    ]
 
     # === Token addresses on Polygon ===
     USDC_NATIVE: str = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"

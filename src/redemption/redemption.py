@@ -1,8 +1,8 @@
 """Auto-redemption module.
 
 Automatically detects resolved Polymarket markets where the bot holds winning
-conditional tokens, and calls the Gnosis CTF redeemPositions() contract function
-to convert those tokens back to USDC.
+conditional tokens, and calls the Gnosis CTF redeemPositions() contract to
+convert those tokens back to USDC.
 
 On-chain flow:
   1. Fetch positions via Data API, filter is_redeemable=True
@@ -14,13 +14,12 @@ On-chain flow:
      )
   3. Log redeemed amounts and notify the trader module to update exposure.
 
-Dry-run mode skips the on-chain call and just prints what would happen.
+Dry-run mode skips the on-chain call and logs what would happen.
 """
 
 import time
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 from rich.console import Console
 from rich.table import Table
@@ -37,10 +36,10 @@ _CTF_ABI = [
         "name": "redeemPositions",
         "type": "function",
         "inputs": [
-            {"name": "collateralToken", "type": "address"},
-            {"name": "parentCollectionId", "type": "bytes32"},
-            {"name": "conditionId", "type": "bytes32"},
-            {"name": "indexSets", "type": "uint256[]"},
+            {"name": "collateralToken",      "type": "address"},
+            {"name": "parentCollectionId",   "type": "bytes32"},
+            {"name": "conditionId",          "type": "bytes32"},
+            {"name": "indexSets",            "type": "uint256[]"},
         ],
         "outputs": [],
         "stateMutability": "nonpayable",
@@ -54,7 +53,6 @@ _CTF_ABI = [
     },
 ]
 
-# ERC-20 balanceOf ABI for checking post-redemption USDC balance
 _ERC20_BALANCE_ABI = [
     {
         "name": "balanceOf",
@@ -69,14 +67,14 @@ _ERC20_BALANCE_ABI = [
 @dataclass
 class RedemptionResult:
     """Result of a single redemption attempt."""
-    condition_id: str
-    market_title: str
-    outcome: str
-    shares: float
+    condition_id:   str
+    market_title:   str
+    outcome:        str
+    shares:         float
     estimated_usdc: float
-    status: str         # "success", "dry_run", "failed", "skipped"
-    tx_hash: str = ""
-    error: str = ""
+    status:         str     # "success" | "dry_run" | "failed" | "skipped"
+    tx_hash:        str = ""
+    error:          str = ""
     timestamp: float = field(default_factory=time.time)
 
     @property
@@ -85,41 +83,40 @@ class RedemptionResult:
 
 
 class AutoRedeemer:
-    """Detects resolved markets and redeems winning shares back to USDC.
+    """Detects resolved markets and redeems winning shares → USDC.
 
     Usage:
         redeemer = AutoRedeemer(address, private_key)
-        results = redeemer.run(positions)
-        total_usd = sum(r.estimated_usdc for r in results if r.succeeded)
+        results  = redeemer.run(positions)
+        total    = sum(r.estimated_usdc for r in results if r.succeeded)
     """
 
-    # Number of blocks to wait for tx confirmation
+    _GAS_LIMIT       = 200_000
     _TX_CONFIRMATIONS = 2
-    # Gas limit for redeemPositions (empirically safe upper bound)
-    _GAS_LIMIT = 200_000
 
     def __init__(
         self,
-        address: str,
+        address:     str,
         private_key: str | None = None,
-        tracker: PositionTracker | None = None,
+        tracker:     PositionTracker | None = None,
     ):
-        self.address = address
+        self.address     = address
         self.private_key = private_key or config.PRIVATE_KEY
-        self.tracker = tracker
-        self._redemption_log: list[RedemptionResult] = []
+        self.tracker     = tracker
+        self._redemption_log:    list[RedemptionResult] = []
         self._total_redeemed_usd: float = 0.0
-        self._w3 = None
-        self._ctf_contract = None
+        self._w3             = None
+        self._ctf_contract   = None
+
+    # ── Public API ──────────────────────────────────────────────────────────
 
     def run(self, positions: list[Position] | None = None) -> list[RedemptionResult]:
-        """Scan positions for redeemable markets and process them.
+        """Scan positions for redeemable markets and process them all.
 
         Args:
-            positions: Pre-fetched positions list. If None, fetches from API.
-
+            positions: Pre-fetched list. If None, fetches from API.
         Returns:
-            List of RedemptionResult for each processed position.
+            List of RedemptionResult for every processed position.
         """
         if positions is None:
             if not self.tracker:
@@ -134,16 +131,15 @@ class AutoRedeemer:
             return []
 
         console.print(
-            f"\n[bold cyan]🔄 Auto-Redemption:[/] found {len(redeemable)} "
-            f"redeemable position{'s' if len(redeemable) != 1 else ''}"
+            f"\n[bold cyan]🔄 Auto-Redemption:[/] "
+            f"found {len(redeemable)} redeemable position"
+            f"{'s' if len(redeemable) != 1 else ''}"
         )
 
         results: list[RedemptionResult] = []
-
         for pos in redeemable:
             result = self._redeem_position(pos)
             results.append(result)
-
             if result.succeeded:
                 self._total_redeemed_usd += result.estimated_usdc
                 self._redemption_log.append(result)
@@ -151,10 +147,8 @@ class AutoRedeemer:
         self._display_results(results)
         return results
 
-    def check_redeemable(
-        self, positions: list[Position] | None = None
-    ) -> list[Position]:
-        """Return positions that are ready to redeem without executing."""
+    def check_redeemable(self, positions: list[Position] | None = None) -> list[Position]:
+        """Return positions ready to redeem without executing anything."""
         if positions is None:
             if not self.tracker:
                 return []
@@ -168,14 +162,13 @@ class AutoRedeemer:
     def get_redemption_log(self) -> list[RedemptionResult]:
         return self._redemption_log.copy()
 
-    # === Private ===
+    # ── Private ─────────────────────────────────────────────────────────────
 
     def _redeem_position(self, pos: Position) -> RedemptionResult:
         """Attempt to redeem a single resolved position."""
-        # Winning side pays $1.00 per share; losing side pays $0.00
-        # current_price on a resolved market is 1.0 (win) or 0.0 (loss).
-        # We only reach here if is_redeemable=True, so price should be ~1.0
-        estimated_usdc = pos.size * max(pos.current_price, 1.0)
+        # BUG FIX: was max(current_price, 1.0) which could overestimate if
+        # price > 1.0. Winning CTF positions always pay exactly $1.00/share.
+        estimated_usdc = pos.size * 1.0
 
         result = RedemptionResult(
             condition_id=pos.condition_id,
@@ -188,7 +181,7 @@ class AutoRedeemer:
 
         if not pos.condition_id:
             result.status = "failed"
-            result.error = "Missing condition_id"
+            result.error  = "missing condition_id — cannot call redeemPositions"
             return result
 
         if config.DRY_RUN:
@@ -202,80 +195,92 @@ class AutoRedeemer:
 
         if not self.private_key:
             result.status = "failed"
-            result.error = "No private key configured"
+            result.error  = "POLY_PRIVATE_KEY not set in Replit Secrets"
             return result
 
         try:
-            w3 = self._get_web3()
+            w3  = self._get_web3()
             ctf = self._get_ctf_contract(w3)
 
-            # conditionId must be bytes32
             condition_bytes = self._hex_to_bytes32(pos.condition_id)
-
-            # Determine indexSet: YES=1 (binary 01), NO=2 (binary 10)
+            # YES = indexSet 1 (binary 01), NO = indexSet 2 (binary 10)
             index_set = 1 if pos.outcome.lower() in ("yes", "1", "true") else 2
 
-            # Build transaction
-            nonce = w3.eth.get_transaction_count(self.address)
-            gas_price = self._get_gas_price(w3)
+            nonce     = w3.eth.get_transaction_count(self.address)
+            gas_price = self._get_gas_params(w3)
 
             tx = ctf.functions.redeemPositions(
-                config.USDC_BRIDGED,          # collateralToken (USDC.e)
-                bytes(32),                    # parentCollectionId = bytes32(0)
-                condition_bytes,              # conditionId
-                [index_set],                  # indexSets
+                config.USDC_BRIDGED,    # collateralToken (USDC.e on Polygon)
+                bytes(32),              # parentCollectionId = bytes32(0)
+                condition_bytes,        # conditionId
+                [index_set],            # indexSets
             ).build_transaction({
-                "from": self.address,
-                "nonce": nonce,
-                "gas": self._GAS_LIMIT,
-                "gasPrice": gas_price,
+                "from":    self.address,
+                "nonce":   nonce,
+                "gas":     self._GAS_LIMIT,
                 "chainId": config.CHAIN_ID,
+                **gas_price,
             })
 
-            # Sign and send
-            signed = w3.eth.account.sign_transaction(tx, private_key=self.private_key)
+            signed  = w3.eth.account.sign_transaction(tx, private_key=self.private_key)
             tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-            tx_hex = tx_hash.hex()
+            tx_hex  = tx_hash.hex()
 
-            # Wait for confirmation
             receipt = w3.eth.wait_for_transaction_receipt(
                 tx_hash, timeout=120, poll_latency=3
             )
 
             if receipt.status == 1:
-                result.status = "success"
+                result.status  = "success"
                 result.tx_hash = tx_hex
                 logger.info(
-                    "Redeemed %.2f shares (%s) from %s → ~$%.2f USDC | tx: %s",
-                    pos.size, pos.outcome, pos.title[:40], estimated_usdc, tx_hex[:16]
+                    "Redeemed %.2f shares (%s) from %s → $%.2f USDC | tx %s",
+                    pos.size, pos.outcome, pos.title[:40], estimated_usdc, tx_hex[:16],
                 )
                 console.print(
                     f"  [bold green]✅ Redeemed[/] {pos.size:.2f} shares "
-                    f"({pos.outcome}) from [cyan]{pos.title[:50]}[/] "
+                    f"({pos.outcome}) [cyan]{pos.title[:50]}[/] "
                     f"→ [bold green]${estimated_usdc:.2f} USDC[/] "
-                    f"| tx: {tx_hex[:12]}..."
+                    f"| tx {tx_hex[:12]}..."
                 )
             else:
                 result.status = "failed"
-                result.error = f"Transaction reverted (tx: {tx_hex[:12]})"
-                console.print(f"  [red]Redemption reverted[/] for {pos.title[:40]}")
+                result.error  = f"transaction reverted (tx {tx_hex[:12]})"
+                console.print(f"  [red]❌ Redemption reverted[/] for {pos.title[:40]}")
 
         except Exception as e:
             result.status = "failed"
-            result.error = str(e)
+            result.error  = str(e)
             logger.error("Redemption failed for %s: %s", pos.condition_id, e)
             console.print(f"  [red]Redemption error:[/] {e}")
 
         return result
 
     def _get_web3(self):
-        """Return a cached Web3 instance."""
-        if self._w3 is None:
-            from web3 import Web3
-            self._w3 = Web3(Web3.HTTPProvider(config.RPC_URL, request_kwargs={"timeout": 30}))
-            if not self._w3.is_connected():
-                raise ConnectionError(f"Cannot connect to RPC at {config.RPC_URL}")
-        return self._w3
+        """Return a cached, connected Web3 instance.
+
+        BUG FIX: was using a single RPC (polygon-rpc.com) which is unreachable
+        from Replit servers. Now uses the ordered fallback list from config.
+        """
+        if self._w3 is not None and self._w3.is_connected():
+            return self._w3
+
+        from web3 import Web3
+        for rpc in config.RPC_FALLBACKS:
+            try:
+                w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 30}))
+                if w3.is_connected():
+                    logger.debug("Web3 connected via %s", rpc)
+                    self._w3 = w3
+                    # Invalidate cached contract when we get a new Web3 instance
+                    self._ctf_contract = None
+                    return w3
+            except Exception:
+                continue
+
+        raise ConnectionError(
+            f"Cannot connect to any Polygon RPC. Tried: {config.RPC_FALLBACKS}"
+        )
 
     def _get_ctf_contract(self, w3):
         """Return a cached CTF contract instance."""
@@ -287,40 +292,48 @@ class AutoRedeemer:
             )
         return self._ctf_contract
 
-    def _get_gas_price(self, w3) -> int:
-        """Get current gas price with a small safety buffer (1.1×)."""
+    def _get_gas_params(self, w3) -> dict:
+        """Build EIP-1559 gas params with a 1.3× safety buffer.
+
+        BUG FIX: was using legacy gasPrice field. Polygon supports EIP-1559
+        and it's significantly more reliable than legacy pricing. Legacy txs
+        can get stuck when base fee spikes.
+        """
         try:
-            base = w3.eth.gas_price
-            return int(base * 1.1)
+            base_fee = w3.eth.gas_price
+            return {
+                "maxFeePerGas":        int(base_fee * 1.3),
+                "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
+            }
         except Exception:
-            return 50_000_000_000  # 50 gwei fallback
+            # Fallback to legacy pricing if fee history is unavailable
+            return {"gasPrice": 50_000_000_000}   # 50 gwei
 
     @staticmethod
     def _hex_to_bytes32(hex_str: str) -> bytes:
-        """Convert a 0x-prefixed hex string to a 32-byte value."""
-        clean = hex_str.removeprefix("0x")
-        padded = clean.zfill(64)
+        """Convert a 0x-prefixed hex string to exactly 32 bytes (left zero-padded)."""
+        clean  = hex_str.removeprefix("0x")
+        padded = clean.zfill(64)          # left-pad to 64 hex chars = 32 bytes
         return bytes.fromhex(padded)
 
     def _display_results(self, results: list[RedemptionResult]) -> None:
-        """Display redemption results as a Rich table."""
         if not results:
             return
 
         table = Table(title="🔄 Redemption Results")
-        table.add_column("Market", style="cyan", max_width=45, no_wrap=True)
-        table.add_column("Side", justify="center")
-        table.add_column("Shares", justify="right")
-        table.add_column("USDC", justify="right", style="green")
-        table.add_column("Status", justify="center")
-        table.add_column("TX", style="dim", max_width=14, no_wrap=True)
+        table.add_column("Market",  style="cyan", max_width=45, no_wrap=True)
+        table.add_column("Side",    justify="center")
+        table.add_column("Shares",  justify="right")
+        table.add_column("USDC",    justify="right", style="green")
+        table.add_column("Status",  justify="center")
+        table.add_column("TX",      style="dim", max_width=14, no_wrap=True)
 
         total_usdc = 0.0
         for r in results:
             status_fmt = {
                 "success": "[bold green]✅ success[/]",
                 "dry_run": "[yellow]🔍 dry run[/]",
-                "failed": "[red]❌ failed[/]",
+                "failed":  "[red]❌ failed[/]",
                 "skipped": "[dim]⏭ skipped[/]",
             }.get(r.status, r.status)
 
@@ -330,11 +343,12 @@ class AutoRedeemer:
                 f"{r.shares:.2f}",
                 f"${r.estimated_usdc:.2f}",
                 status_fmt,
-                r.tx_hash[:12] + "..." if r.tx_hash else (r.error[:12] if r.error else "—"),
+                (r.tx_hash[:12] + "..." if r.tx_hash
+                 else r.error[:14] if r.error else "—"),
             )
             if r.succeeded:
                 total_usdc += r.estimated_usdc
 
         console.print(table)
         if total_usdc > 0:
-            console.print(f"[bold green]Total redeemed this run: ${total_usdc:.2f} USDC[/]")
+            console.print(f"[bold green]Total redeemable this run: ${total_usdc:.2f} USDC[/]")

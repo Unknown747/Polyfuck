@@ -29,3 +29,7 @@ args = "python -m src.bot --dry-run"
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[deployment]
+deploymentTarget = "vm"
+run = ["python", "-m", "src.bot", "--dry-run"]
