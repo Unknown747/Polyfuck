@@ -31,5 +31,5 @@ args = "python -m src.bot --dry-run"
 outputType = "console"
 
 [deployment]
-deploymentTarget = "vm"
+deploymentTarget = "cloudrun"
 run = ["python", "-m", "src.bot", "--dry-run"]
