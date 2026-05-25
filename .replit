@@ -37,3 +37,10 @@ run = ["python", "-m", "src.bot", "--dry-run"]
 [[ports]]
 localPort = 8080
 externalPort = 80
+
+[userenv]
+
+[userenv.shared]
+DRY_RUN = "true"
+LOG_LEVEL = "INFO"
+LOG_FILE = "logs/bot.log"
