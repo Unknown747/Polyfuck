@@ -227,7 +227,7 @@ class PolymarketBot:
             console.print(f"[red]Auto-redemption error: {e}[/]")
 
     def _show_status(self) -> None:
-        """Show bot status summary."""
+        """Show bot status summary and update shared dashboard stats."""
         daily = self.trader.get_daily_summary()
         console.print(
             f"\n[bold]── Status ──[/]\n"
@@ -241,6 +241,20 @@ class PolymarketBot:
             f"Redeemed: ${self._total_redeemed_usd:.2f} | "
             f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}"
         )
+        # Push live stats to HTML dashboard
+        _stats.update({
+            "scans": self._scan_count,
+            "opportunities": self._opportunities_found,
+            "trades": self._trades_executed,
+            "open_positions": daily["open_positions"],
+            "max_positions": config.MAX_OPEN_POSITIONS,
+            "exposure": daily["total_exposure_usd"],
+            "max_exposure": config.MAX_TOTAL_EXPOSURE_USD,
+            "daily_pnl": daily["daily_pnl"],
+            "redeemed": self._total_redeemed_usd,
+            "mode": "DRY RUN" if self.dry_run else "LIVE",
+            "last_scan": time.strftime("%H:%M:%S UTC", time.gmtime()),
+        })
 
     def _signal_handler(self, signum, frame) -> None:
         console.print(f"\n[yellow]Signal {signum} received, shutting down...[/]")
@@ -277,19 +291,107 @@ class PolymarketBot:
         )
 
 
+# Shared stats dict — updated by bot, read by HTTP handler
+_stats: dict = {
+    "scans": 0,
+    "opportunities": 0,
+    "trades": 0,
+    "open_positions": 0,
+    "max_positions": 4,
+    "exposure": 0.0,
+    "max_exposure": 8.0,
+    "daily_pnl": 0.0,
+    "redeemed": 0.0,
+    "mode": "DRY RUN",
+    "last_scan": "–",
+    "started": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
+}
+
+
+def _render_html() -> str:
+    s = _stats
+    pnl_color = "#2ecc71" if s["daily_pnl"] >= 0 else "#e74c3c"
+    mode_color = "#e74c3c" if s["mode"] == "LIVE" else "#f39c12"
+    exposure_pct = int((s["exposure"] / s["max_exposure"]) * 100) if s["max_exposure"] else 0
+    pos_pct = int((s["open_positions"] / s["max_positions"]) * 100) if s["max_positions"] else 0
+    return f"""<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>ClawBots – Polymarket Bot</title>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',sans-serif;padding:24px}}
+  h1{{font-size:1.4rem;margin-bottom:4px;color:#58a6ff}}
+  .sub{{color:#8b949e;font-size:.85rem;margin-bottom:24px}}
+  .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px;margin-bottom:24px}}
+  .card{{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:18px}}
+  .card .label{{color:#8b949e;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}}
+  .card .value{{font-size:1.6rem;font-weight:700}}
+  .bar-wrap{{background:#21262d;border-radius:4px;height:8px;overflow:hidden;margin-top:8px}}
+  .bar{{height:100%;border-radius:4px;background:#58a6ff;transition:width .4s}}
+  .badge{{display:inline-block;padding:3px 10px;border-radius:20px;font-size:.78rem;font-weight:600}}
+  .footer{{color:#8b949e;font-size:.78rem;text-align:center;margin-top:8px}}
+</style>
+</head>
+<body>
+<h1>🔫 ClawBots – Polymarket Bot</h1>
+<p class="sub">Mulai: {s['started']} &nbsp;|&nbsp; Scan terakhir: {s['last_scan']} &nbsp;|&nbsp;
+  <span class="badge" style="background:{mode_color}22;color:{mode_color}">{s['mode']}</span>
+</p>
+<div class="grid">
+  <div class="card">
+    <div class="label">Total Scan</div>
+    <div class="value">{s['scans']}</div>
+  </div>
+  <div class="card">
+    <div class="label">Peluang</div>
+    <div class="value">{s['opportunities']}</div>
+  </div>
+  <div class="card">
+    <div class="label">Trade Dieksekusi</div>
+    <div class="value">{s['trades']}</div>
+  </div>
+  <div class="card">
+    <div class="label">Daily P&L</div>
+    <div class="value" style="color:{pnl_color}">${s['daily_pnl']:+.2f}</div>
+  </div>
+  <div class="card">
+    <div class="label">Diredeeem</div>
+    <div class="value">${s['redeemed']:.2f}</div>
+  </div>
+  <div class="card">
+    <div class="label">Posisi Terbuka</div>
+    <div class="value">{s['open_positions']} / {s['max_positions']}</div>
+    <div class="bar-wrap"><div class="bar" style="width:{pos_pct}%"></div></div>
+  </div>
+  <div class="card">
+    <div class="label">Eksposur</div>
+    <div class="value">${s['exposure']:.2f}</div>
+    <div class="bar-wrap"><div class="bar" style="width:{exposure_pct}%"></div></div>
+  </div>
+</div>
+<p class="footer">Auto-refresh setiap 30 detik &nbsp;·&nbsp; polyfuck--ren00991122.replit.app</p>
+</body>
+</html>"""
+
+
 def _start_health_server() -> None:
-    """Start a minimal HTTP health-check server in a background thread.
-    Required by Replit autoscale deployment to detect an open port."""
+    """Start HTML dashboard + health-check server in a background thread."""
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
+            body = _render_html().encode("utf-8")
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(b"OK")
+            self.wfile.write(body)
 
         def log_message(self, format, *args):
-            pass  # suppress HTTP access logs
+            pass
 
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), Handler)
