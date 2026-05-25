@@ -343,7 +343,7 @@ class Trader:
             )
             return False
 
-        if abs(self._daily_pnl) > config.MAX_DAILY_LOSS_USD:
+        if self._daily_pnl < -config.MAX_DAILY_LOSS_USD:
             console.print(
                 f"[red]Daily loss ${abs(self._daily_pnl):.2f} > "
                 f"limit ${config.MAX_DAILY_LOSS_USD:.2f} — trading halted[/]"

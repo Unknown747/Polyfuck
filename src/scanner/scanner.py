@@ -150,7 +150,8 @@ class MarketScanner:
             try:
                 corrs = self._check_event_correlations(slug, markets, min_edge_pct)
                 opportunities.extend(corrs)
-            except Exception:
+            except Exception as e:
+                console.print(f"[dim yellow]Warning: skipped event {slug} in correlation scan: {e}[/]")
                 continue
 
         console.print(f"[green]Found {len(opportunities)} cross-market opportunities[/]")

@@ -125,10 +125,12 @@ def validate_private_key(key: str) -> bool:
 
 def wallet_summary(wallet: dict) -> str:
     """Return a safe summary string for logging (no private key)."""
+    chain_id   = wallet.get("chain_id", 137)
+    created_at = wallet.get("created_at", "unknown")
     return (
         f"Wallet: {wallet['address']}\n"
-        f"Chain: Polygon (chain ID {wallet['chain_id']})\n"
-        f"Created: {wallet['created_at']}\n"
+        f"Chain: Polygon (chain ID {chain_id})\n"
+        f"Created: {created_at}\n"
         f"⚠️  Fund with USDC on Polygon to start trading."
     )
 

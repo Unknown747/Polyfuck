@@ -359,7 +359,7 @@ def _render_html() -> str:
     <div class="value" style="color:{pnl_color}">${s['daily_pnl']:+.2f}</div>
   </div>
   <div class="card">
-    <div class="label">Diredeeem</div>
+    <div class="label">Redeemed</div>
     <div class="value">${s['redeemed']:.2f}</div>
   </div>
   <div class="card">
@@ -394,9 +394,13 @@ def _start_health_server() -> None:
             pass
 
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
+    try:
+        server = HTTPServer(("0.0.0.0", port), Handler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        logging.getLogger("polymarket-bot").info("Dashboard running on port %d", port)
+    except OSError as e:
+        logging.getLogger("polymarket-bot").warning("Could not start dashboard server: %s", e)
 
 
 def main():
