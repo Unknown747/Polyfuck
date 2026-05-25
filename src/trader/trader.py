@@ -57,6 +57,11 @@ class Trader:
         self._total_exposure_usd: float = 0.0
         # Load persisted daily PnL so restarts don't reset the loss limit
         self._daily_pnl: float = self._load_daily_pnl()
+        # Trailing stop tracking: condition_id -> (entry_price, invested_usd)
+        self._position_entry: dict[str, tuple[float, float]] = {}
+        self._stops_triggered: int = 0
+        # Current trade size (may be updated by auto-compound)
+        self._current_trade_size: float = config.DEFAULT_TRADE_SIZE_USD
 
     def _load_daily_pnl(self) -> float:
         """Load today's PnL from disk. Returns 0 if no file or it's from a previous day."""
@@ -148,8 +153,10 @@ class Trader:
             category: Market category for fee estimation
         """
         # Use configured default trade size if not specified
+        # BUG FIX: use self._current_trade_size (may have been updated by auto-compound)
+        # rather than the static config default so auto-compound actually takes effect.
         if investment_usd is None:
-            investment_usd = config.DEFAULT_TRADE_SIZE_USD
+            investment_usd = self._current_trade_size
 
         # Cap to max position size
         investment_usd = min(investment_usd, config.MAX_POSITION_USD)
@@ -191,6 +198,7 @@ class Trader:
             self._daily_trades += 1
             self._open_position_count += 1
             self._total_exposure_usd += investment_usd
+            self.register_entry(opp.condition_id, opp.yes_price, investment_usd)
             return trade
 
         if not self.clob._authenticated:
@@ -259,6 +267,8 @@ class Trader:
                 self._daily_trades += 1
                 self._open_position_count += 1
                 self._total_exposure_usd += investment_usd
+                # BUG FIX: register entry for trailing-stop tracking (live path was missing this)
+                self.register_entry(opp.condition_id, opp.yes_price, investment_usd)
                 console.print(
                     f"[bold green]✅ Trade executed![/] "
                     f"YES: {yes_trade.order_id} | NO: {no_trade.order_id}"
@@ -320,8 +330,9 @@ class Trader:
             use_maker_price: Post 1 tick below market price → 0% maker fee.
                              Higher return but may not fill immediately.
         """
+        # BUG FIX: use self._current_trade_size so auto-compound affects near-resolved trades too
         if investment_usd is None:
-            investment_usd = config.DEFAULT_TRADE_SIZE_USD
+            investment_usd = self._current_trade_size
         investment_usd = min(investment_usd, config.MAX_POSITION_USD)
 
         if not self._check_safety_limits(investment_usd):
@@ -357,6 +368,8 @@ class Trader:
             self._daily_trades += 1
             self._open_position_count += 1
             self._total_exposure_usd += investment_usd
+            # BUG FIX: register entry in dry_run path for trailing-stop tracking
+            self.register_entry(opp.condition_id, buy_price, investment_usd)
             return trade
 
         if not self.clob._authenticated:
@@ -380,6 +393,8 @@ class Trader:
                 self._daily_trades += 1
                 self._open_position_count += 1
                 self._total_exposure_usd += investment_usd
+                # BUG FIX: register entry in live path for trailing-stop tracking
+                self.register_entry(opp.condition_id, buy_price, investment_usd)
                 console.print(
                     f"[bold green]✅ Near-resolved order placed![/] "
                     f"Order: {result.order_id}"
@@ -388,6 +403,95 @@ class Trader:
         except Exception as e:
             console.print(f"[red]Near-resolved trade failed: {e}[/]")
             return None
+
+    def register_entry(self, condition_id: str, price: float, size: float) -> None:
+        """Record the entry price and size for a new position (for trailing stop tracking)."""
+        if condition_id:
+            self._position_entry[condition_id] = (price, size)
+
+    def check_trailing_stops(
+        self, positions: list[Any]
+    ) -> list[Trade]:
+        """Check open positions against trailing stop threshold.
+
+        For each position whose current mid-price has dropped >=TRAILING_STOP_PCT%
+        below the recorded entry price, place a market sell (FOK) to close it.
+
+        Args:
+            positions: list of position dicts from PositionTracker (each has
+                       'conditionId', 'currentValue', 'size', 'tokenId').
+        Returns:
+            List of Trade records for positions that were closed.
+        """
+        if config.TRAILING_STOP_PCT <= 0:
+            return []
+
+        closed: list[Trade] = []
+        for pos in positions:
+            cond_id = pos.get("conditionId", "")
+            if cond_id not in self._position_entry:
+                continue
+
+            entry_price, invested = self._position_entry[cond_id]
+            if entry_price <= 0:
+                continue
+
+            # current_value is total USDC value of position; derive per-share price
+            try:
+                current_value = float(pos.get("currentValue") or pos.get("value") or 0)
+                size_shares   = float(pos.get("size") or 1)
+                current_price = current_value / size_shares if size_shares > 0 else 0.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                continue
+
+            if current_price <= 0:
+                continue
+
+            drop_pct = (entry_price - current_price) / entry_price * 100
+
+            if drop_pct >= config.TRAILING_STOP_PCT:
+                console.print(
+                    f"[bold red]🛑 Trailing stop triggered![/] "
+                    f"Condition {cond_id[:10]}… dropped "
+                    f"{drop_pct:.1f}% from entry ${entry_price:.2f} → ${current_price:.2f}"
+                )
+                token_id = pos.get("tokenId") or pos.get("token_id", "")
+                trade = self.close_position(
+                    token_id=token_id,
+                    size=size_shares,
+                    condition_id=cond_id,
+                )
+                if trade:
+                    self._stops_triggered += 1
+                    # Remove from tracking
+                    del self._position_entry[cond_id]
+                    closed.append(trade)
+
+        return closed
+
+    def auto_compound(self, usdc_balance: float) -> float:
+        """Recalculate and apply a new trade size from current USDC balance.
+
+        New trade size = COMPOUND_PCT × balance, clamped to
+        [MIN_TRADE_SIZE_USD, MAX_POSITION_USD].
+
+        Returns the new trade size.
+        """
+        if not config.AUTO_COMPOUND or usdc_balance <= 0:
+            return self._current_trade_size
+
+        new_size = usdc_balance * config.COMPOUND_PCT
+        new_size = max(config.MIN_TRADE_SIZE_USD, min(new_size, config.MAX_POSITION_USD))
+        new_size = round(new_size, 2)
+
+        if new_size != self._current_trade_size:
+            console.print(
+                f"[cyan]💰 Auto-compound:[/] balance=${usdc_balance:.2f} → "
+                f"trade size ${self._current_trade_size:.2f} → ${new_size:.2f}"
+            )
+            self._current_trade_size = new_size
+
+        return new_size
 
     def record_redemption(self, amount_usd: float) -> None:
         """Record that a redemption added funds back to the account."""
@@ -414,11 +518,13 @@ class Trader:
 
     def get_daily_summary(self) -> dict:
         return {
-            "daily_pnl": self._daily_pnl,
-            "daily_trades": self._daily_trades,
-            "open_positions": self._open_position_count,
+            "daily_pnl":          self._daily_pnl,
+            "daily_trades":       self._daily_trades,
+            "open_positions":     self._open_position_count,
             "total_exposure_usd": self._total_exposure_usd,
-            "trade_log": self._trade_log,
+            "trade_log":          self._trade_log,
+            "stops_triggered":    self._stops_triggered,
+            "current_trade_size": self._current_trade_size,
         }
 
     # === Private Methods ===

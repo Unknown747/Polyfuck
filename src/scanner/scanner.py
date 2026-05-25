@@ -127,6 +127,31 @@ class MarketScanner:
         self.gamma = gamma or GammaClient()
         self.clob = clob or ClobClient()
         self._market_cache: dict[str, dict] = {}
+        # Per-category opportunity counts for the dashboard
+        self._category_stats: dict[str, int] = {}
+
+    def _get_category_min_edge(self, category: str, base_edge: float) -> float:
+        """Compute a fee-adjusted minimum edge for a category.
+
+        Ensures the strategy edge is large enough to cover round-trip taker fees
+        (buy + sell) × FEE_EDGE_MULT safety margin.
+
+        Formula: max(base_edge, fee_rate × 100 × FEE_EDGE_MULT)
+
+        Why ×100 (not ×200): for mispricing (buy both YES+NO sides and hold to
+        resolution), total taker fee ≈ fee_rate × investment — NOT 2× — because
+        the YES and NO fee terms cancel to exactly fee_rate × payout in a balanced
+        market.  The FEE_EDGE_MULT safety margin already provides headroom.
+        For crypto (7% fee, mult=1.5): effective min_edge = 7 × 1.5 = 10.5%.
+        """
+        from src.config import config
+        fee_rate = config.CATEGORY_TAKER_FEES.get(category, 0.04)
+        fee_adjusted = fee_rate * 100 * config.FEE_EDGE_MULT
+        return max(base_edge, fee_adjusted)
+
+    def get_category_stats(self) -> dict[str, int]:
+        """Return per-category opportunity counts since scanner started."""
+        return dict(self._category_stats)
 
     def scan_all(
         self,
@@ -151,9 +176,15 @@ class MarketScanner:
                 console.print(f"  Checked {checked} markets...")
 
             try:
-                opp = self._check_single_market(market, min_edge_pct, min_volume)
+                # Smart Category Filtering: raise effective min_edge for high-fee categories
+                category = market.get("_category", "")
+                cat_min_edge = self._get_category_min_edge(category, min_edge_pct)
+                opp = self._check_single_market(market, cat_min_edge, min_volume)
                 if opp:
                     opportunities.append(opp)
+                    self._category_stats[category] = (
+                        self._category_stats.get(category, 0) + 1
+                    )
             except Exception as e:
                 # BUG FIX: log errors instead of silently swallowing them
                 console.print(f"[dim yellow]Warning: skipped market due to error: {e}[/]")

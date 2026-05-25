@@ -22,35 +22,51 @@ class Config:
     DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 
     # === Capital & position sizing (calibrated for $10 USDT account) ===
-    # Maximum USD to risk on a single position (30% of $10)
     MAX_POSITION_USD: float = float(os.getenv("MAX_POSITION_USD", "3"))
-    # Default trade size per mispricing opportunity
     DEFAULT_TRADE_SIZE_USD: float = float(os.getenv("DEFAULT_TRADE_SIZE_USD", "2"))
-    # Stop trading if total open exposure exceeds this
     MAX_TOTAL_EXPOSURE_USD: float = float(os.getenv("MAX_TOTAL_EXPOSURE_USD", "8"))
 
     # === Safety limits ===
-    # Hard-stop daily loss limit (20% of $10)
     MAX_DAILY_LOSS_USD: float = float(os.getenv("MAX_DAILY_LOSS_USD", "2"))
-    # Minimum mispricing edge (%) to enter — lower = more trades with small capital
     MIN_EDGE_PCT: float = float(os.getenv("MIN_EDGE_PCT", "2.0"))
-    # Maximum concurrent arb positions (YES+NO pairs count as 1)
     MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "4"))
 
+    # === Trailing Stop-Loss ===
+    # Close a position if its current price has dropped >= this % from entry.
+    # Set to 0 to disable.
+    TRAILING_STOP_PCT: float = float(os.getenv("TRAILING_STOP_PCT", "30.0"))
+
+    # === Auto-Compound ===
+    # After a successful redemption, recalculate trade size as
+    # COMPOUND_PCT × current USDC balance (clamped between MIN/MAX).
+    AUTO_COMPOUND: bool = os.getenv("AUTO_COMPOUND", "false").lower() in ("true", "1", "yes")
+    COMPOUND_PCT: float = float(os.getenv("COMPOUND_PCT", "0.20"))
+    MIN_TRADE_SIZE_USD: float = float(os.getenv("MIN_TRADE_SIZE_USD", "1.0"))
+
     # === Scanning ===
-    # Seconds between market scans (2 min to be gentle on public APIs)
     SCAN_INTERVAL_SEC: int = int(os.getenv("SCAN_INTERVAL_SEC", "120"))
-    # Categories to scan (comma-separated)
     SCAN_CATEGORIES: list[str] = os.getenv(
         "SCAN_CATEGORIES", "crypto,politics,sports,finance"
     ).split(",")
-    # Minimum 24h volume (USD) for a market to be considered
     MIN_MARKET_VOLUME: float = float(os.getenv("MIN_MARKET_VOLUME", "500"))
 
+    # === Smart Category Filtering ===
+    # Per-category taker fee rates used to compute a fee-adjusted minimum edge.
+    # effective_min_edge = max(MIN_EDGE_PCT, base_edge + fee_rate * 100 * FEE_EDGE_MULT)
+    # FEE_EDGE_MULT of 1.5 means we require edge ≥ 1.5× the round-trip taker fee.
+    CATEGORY_TAKER_FEES: dict = {
+        "crypto":      0.07,
+        "sports":      0.03,
+        "finance":     0.04,
+        "politics":    0.04,
+        "economics":   0.05,
+        "culture":     0.05,
+        "geopolitics": 0.00,
+    }
+    FEE_EDGE_MULT: float = float(os.getenv("FEE_EDGE_MULT", "1.5"))
+
     # === Auto-redemption ===
-    # Whether to automatically redeem resolved winning positions on-chain
     AUTO_REDEEM: bool = os.getenv("AUTO_REDEEM", "true").lower() in ("true", "1", "yes")
-    # Check for redeemable positions every N scans
     REDEEM_CHECK_INTERVAL: int = int(os.getenv("REDEEM_CHECK_INTERVAL", "5"))
 
     # === API endpoints ===
@@ -64,13 +80,7 @@ class Config:
 
     # === Polygon chain ===
     CHAIN_ID: int = 137
-    # BUG FIX: polygon-rpc.com is unreachable from Replit servers.
-    # polygon.drpc.org is the most reliable public RPC from cloud environments.
     RPC_URL: str = os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org")
-
-    # Ordered fallback list — tried in sequence if primary RPC fails.
-    # Verified reachable from Replit cloud (polygon-mainnet.public.blastapi.io
-    # and rpc-mainnet.maticvigil.com are NOT reachable from Replit servers).
     RPC_FALLBACKS: list[str] = [
         os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org"),
         "https://polygon-bor-rpc.publicnode.com",
@@ -86,7 +96,6 @@ class Config:
     COLLATERAL_OFFRAMP: str = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854"
     CTF_EXCHANGE_V2: str = "0xE111180000d2663C0091e4f400237545B87B996B"
     NEG_RISK_CTF_EXCHANGE_V2: str = "0xe2222d279d744050d28e00520010520000310F59"
-    # Gnosis Conditional Token Framework contract (handles redemption)
     CTF_CONTRACT: str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
     @classmethod
@@ -105,16 +114,18 @@ class Config:
                 f"DEFAULT_TRADE_SIZE_USD ({cls.DEFAULT_TRADE_SIZE_USD}) "
                 f"exceeds MAX_POSITION_USD ({cls.MAX_POSITION_USD})"
             )
+        if cls.COMPOUND_PCT <= 0 or cls.COMPOUND_PCT > 1.0:
+            errors.append("COMPOUND_PCT must be between 0 and 1.0 (e.g. 0.20 = 20%)")
+        if cls.TRAILING_STOP_PCT < 0:
+            errors.append("TRAILING_STOP_PCT must be >= 0 (set to 0 to disable)")
         return errors
 
     @classmethod
     def is_configured(cls) -> bool:
-        """Check if bot is ready for live trading."""
         return len(cls.validate()) == 0
 
     @classmethod
     def summary(cls) -> dict:
-        """Return config summary for logging (no secrets)."""
         return {
             "dry_run": cls.DRY_RUN,
             "default_trade_size_usd": cls.DEFAULT_TRADE_SIZE_USD,
@@ -123,6 +134,9 @@ class Config:
             "max_daily_loss_usd": cls.MAX_DAILY_LOSS_USD,
             "min_edge_pct": cls.MIN_EDGE_PCT,
             "max_open_positions": cls.MAX_OPEN_POSITIONS,
+            "trailing_stop_pct": cls.TRAILING_STOP_PCT,
+            "auto_compound": cls.AUTO_COMPOUND,
+            "compound_pct": cls.COMPOUND_PCT,
             "scan_interval_sec": cls.SCAN_INTERVAL_SEC,
             "scan_categories": cls.SCAN_CATEGORIES,
             "auto_redeem": cls.AUTO_REDEEM,
