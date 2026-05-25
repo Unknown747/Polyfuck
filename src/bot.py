@@ -4,6 +4,9 @@ import sys
 import time
 import signal
 import logging
+import os
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from rich.console import Console
@@ -274,9 +277,31 @@ class PolymarketBot:
         )
 
 
+def _start_health_server() -> None:
+    """Start a minimal HTTP health-check server in a background thread.
+    Required by Replit autoscale deployment to detect an open port."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, format, *args):
+            pass  # suppress HTTP access logs
+
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+
+
 def main():
     """CLI entry point."""
     import argparse
+
+    _start_health_server()
 
     parser = argparse.ArgumentParser(description="ClawBots Polymarket Bot 🔫🧬")
     parser.add_argument(

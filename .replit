@@ -33,3 +33,7 @@ outputType = "console"
 [deployment]
 deploymentTarget = "vm"
 run = ["python", "-m", "src.bot", "--dry-run"]
+
+[[ports]]
+localPort = 8080
+externalPort = 80
