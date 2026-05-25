@@ -146,7 +146,11 @@ class MarketScanner:
         """
         from src.config import config
         fee_rate = config.CATEGORY_TAKER_FEES.get(category, 0.04)
-        fee_adjusted = fee_rate * 100 * config.FEE_EDGE_MULT
+        # fee_rate * 50 = fee_rate * 100 * 0.5
+        # The 0.5 factor reflects that the actual fee paid per dollar invested is
+        # fee_rate × p × (1-p) ≈ fee_rate × 0.25 per leg × 2 legs = fee_rate × 0.5,
+        # NOT fee_rate × 1.0.  The old formula (× 100 × 1.5) was 3× too aggressive.
+        fee_adjusted = fee_rate * 50 * config.FEE_EDGE_MULT
         return max(base_edge, fee_adjusted)
 
     def get_category_stats(self) -> dict[str, int]:

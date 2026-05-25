@@ -198,6 +198,9 @@ class Trader:
             self._daily_trades += 1
             self._open_position_count += 1
             self._total_exposure_usd += investment_usd
+            # Track simulated P&L so the dashboard chart is not empty in dry-run
+            self._daily_pnl -= investment_usd
+            self._persist_daily_pnl()
             self.register_entry(opp.condition_id, opp.yes_price, investment_usd)
             return trade
 
@@ -368,7 +371,9 @@ class Trader:
             self._daily_trades += 1
             self._open_position_count += 1
             self._total_exposure_usd += investment_usd
-            # BUG FIX: register entry in dry_run path for trailing-stop tracking
+            # Track simulated P&L so the dashboard chart is not empty in dry-run
+            self._daily_pnl -= investment_usd
+            self._persist_daily_pnl()
             self.register_entry(opp.condition_id, buy_price, investment_usd)
             return trade
 

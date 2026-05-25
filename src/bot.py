@@ -7,8 +7,11 @@ import signal
 import logging
 import os
 import threading
+import collections
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+import src.utils.db as trade_db
 
 from rich.console import Console
 from rich.panel import Panel
@@ -42,6 +45,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger("polymarket-bot")
 
+# Dedicated error log file + in-memory ring buffer exposed via /api/errors
+_error_log: collections.deque = collections.deque(maxlen=20)
+
+_err_file_handler = logging.FileHandler("logs/errors.log")
+_err_file_handler.setLevel(logging.ERROR)
+_err_file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logger.addHandler(_err_file_handler)
+
+
+class _ErrorCapture(logging.Handler):
+    """Capture ERROR+ log records into the in-memory ring buffer."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        _error_log.append({
+            "time":  self.formatTime(record, "%H:%M:%S"),
+            "level": record.levelname,
+            "msg":   record.getMessage()[:200],
+        })
+
+
+_err_capture = _ErrorCapture(level=logging.ERROR)
+logger.addHandler(_err_capture)
+
 
 class PolymarketBot:
     """Main bot controller — orchestrates scanning, trading, and redemption."""
@@ -67,6 +93,10 @@ class PolymarketBot:
         self._trades_executed     = 0
         self._total_redeemed_usd  = 0.0
         self._near_resolved_found = 0
+
+        # Initialise SQLite trade history and wallet balance cache
+        trade_db.init_db()
+        self._wallet_balance: float = 0.0
 
     def start(self) -> None:
         """Start the bot."""
@@ -183,6 +213,10 @@ class PolymarketBot:
                             f"profitable after fees.[/]"
                         )
 
+                    # Persist to SQLite
+                    if trade:
+                        trade_db.insert_trade(trade, category, "mispricing")
+
                     # Feature 3: Log opportunity to CSV/JSONL
                     row = opp_logger.log_mispricing(best, executed, profit_calc, category)
                     _append_opp_log(row)
@@ -198,23 +232,24 @@ class PolymarketBot:
                 else:
                     console.print("[dim]No opportunities found. Waiting...[/]")
 
-                # 1b. Near-resolved scan every 3 scans
-                if self._scan_count % 3 == 0:
-                    near_resolved = self.scanner.scan_near_resolved(
-                        categories=config.SCAN_CATEGORIES,
-                    )
-                    if near_resolved:
-                        self._near_resolved_found += len(near_resolved)
-                        display_near_resolved(near_resolved)
-                        best_nr    = near_resolved[0]
+                # 1b. Near-resolved scan — runs every scan (not every 3)
+                # so opportunities are not missed when they close quickly.
+                near_resolved = self.scanner.scan_near_resolved(
+                    categories=config.SCAN_CATEGORIES,
+                )
+                if near_resolved:
+                    self._near_resolved_found += len(near_resolved)
+                    display_near_resolved(near_resolved)
+                    # Attempt up to 2 near-resolved trades per scan (safety limits apply)
+                    for best_nr in near_resolved[:2]:
                         nr_executed = False
-                        # BUG FIX: pass current trade size so auto-compound applies
-                        nr_trade   = self.trader.execute_near_resolved_trade(
+                        nr_trade    = self.trader.execute_near_resolved_trade(
                             best_nr, investment_usd=self.trader._current_trade_size
                         )
                         if nr_trade:
                             self._trades_executed += 1
                             nr_executed = True
+                            trade_db.insert_trade(nr_trade, "", "near_resolved")
 
                         # Feature 3: Log near-resolved opportunity
                         nr_row = opp_logger.log_near_resolved(best_nr, nr_executed)
@@ -317,6 +352,10 @@ class PolymarketBot:
         if len(hist) > 50:
             hist = hist[-50:]
 
+        # Refresh wallet balance every 10 scans (or at startup)
+        if self._scan_count % 10 == 1:
+            self._wallet_balance = self._fetch_wallet_balance()
+
         _stats.update({
             "scans":           self._scan_count,
             "opportunities":   self._opportunities_found,
@@ -336,7 +375,20 @@ class PolymarketBot:
             "pnl_history":     hist,
             "opp_stats":       opp_logger.get_stats(),
             "category_stats":  self.scanner.get_category_stats(),
+            "wallet_balance":  self._wallet_balance,
+            "db_stats":        trade_db.get_db_stats(),
         })
+
+    def _fetch_wallet_balance(self) -> float:
+        """Return USDC wallet balance. Returns 0.0 in dry-run or if unavailable."""
+        if self.dry_run or not self.clob._authenticated:
+            return 0.0
+        try:
+            data = self.clob.get_balance_allowance("COLLATERAL")
+            return float(data.get("balance", 0) or 0)
+        except Exception as e:
+            logger.warning("Could not fetch wallet balance: %s", e)
+            return 0.0
 
     def _authenticate(self) -> None:
         try:
@@ -397,7 +449,6 @@ _stats: dict = {
     "mode":            "DRY RUN",
     "last_scan":       "–",
     "started":         time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
-    # Feature extras
     "trade_size_usd":  config.DEFAULT_TRADE_SIZE_USD,
     "stops_triggered": 0,
     "trade_log":       [],
@@ -405,6 +456,8 @@ _stats: dict = {
     "pnl_history":     [],
     "opp_stats":       {"total_logged": 0, "executed": 0, "avg_edge_pct": 0.0},
     "category_stats":  {},
+    "wallet_balance":  0.0,
+    "db_stats":        {"total": 0, "executed": 0, "dry_run": 0},
 }
 
 
@@ -487,6 +540,14 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
   <div class="card"><div class="label">Stop-Loss Hit</div><div class="value r" id="v-stops">0</div></div>
   <div class="card"><div class="label">Opp Dicatat</div><div class="value" id="v-opp-log">0</div></div>
+  <div class="card">
+    <div class="label">Wallet Balance</div>
+    <div class="value g" id="v-wallet">–</div>
+  </div>
+  <div class="card">
+    <div class="label">Trade DB Total</div>
+    <div class="value" id="v-db-total">–</div>
+  </div>
 </div>
 
 <div class="section">
@@ -516,6 +577,14 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <table>
     <thead><tr><th>Kategori</th><th>Peluang</th><th>Fee Taker</th><th>Min Edge Efektif</th></tr></thead>
     <tbody id="catBody"><tr><td colspan="4" style="color:#8b949e;text-align:center">Belum ada data</td></tr></tbody>
+  </table>
+</div>
+
+<div class="section" id="errSection" style="display:none">
+  <h3>&#x26A0;&#xFE0F; Error Terbaru</h3>
+  <table>
+    <thead><tr><th>Waktu</th><th>Level</th><th>Pesan</th></tr></thead>
+    <tbody id="errBody"></tbody>
   </table>
 </div>
 
@@ -553,6 +622,13 @@ async function fetchStats(){
     document.getElementById('v-trades').textContent=s.trades??'–';
     document.getElementById('v-stops').textContent=s.stops_triggered??'0';
     document.getElementById('v-opp-log').textContent=(s.opp_stats&&s.opp_stats.total_logged)||'0';
+
+    const bal=parseFloat(s.wallet_balance||0);
+    const walletEl=document.getElementById('v-wallet');
+    walletEl.textContent=s.mode==='DRY RUN'?'N/A':'$'+bal.toFixed(2);
+
+    const dbs=s.db_stats||{};
+    document.getElementById('v-db-total').textContent=(dbs.total||0)+' trades';
 
     const pnl=parseFloat(s.daily_pnl||0);
     const pe=document.getElementById('v-pnl');
@@ -605,7 +681,7 @@ async function fetchStats(){
       ?'<tr><td colspan="4" style="color:#8b949e;text-align:center">Belum ada data</td></tr>'
       :entries.map(([cat,cnt])=>{
         const fee=(FEES[cat]||0);
-        const minEdge=Math.max(1.5,fee*100*FEE_MULT).toFixed(1);
+        const minEdge=Math.max(1.5,fee*50*FEE_MULT).toFixed(1);
         return `<tr>
           <td>${cat}</td><td>${cnt}</td>
           <td style="color:#8b949e">${(fee*100).toFixed(0)}%</td>
@@ -618,8 +694,23 @@ async function fetchStats(){
     document.getElementById('footer').textContent='Gagal memuat data \u2014 mencoba lagi...';
   }
 }
+async function fetchErrors(){
+  try{
+    const errs=await fetch('/api/errors').then(r=>r.json());
+    const sec=document.getElementById('errSection');
+    if(!errs||errs.length===0){sec.style.display='none';return;}
+    sec.style.display='';
+    document.getElementById('errBody').innerHTML=errs.slice(0,10).map(e=>`<tr>
+      <td style="color:#8b949e">${e.time||'–'}</td>
+      <td class="r">${e.level||'ERROR'}</td>
+      <td style="word-break:break-word">${e.msg||''}</td>
+    </tr>`).join('');
+  }catch(e){}
+}
 setInterval(fetchStats,5000);
+setInterval(fetchErrors,10000);
 fetchStats();
+fetchErrors();
 </script>
 </body>
 </html>"""
@@ -647,15 +738,31 @@ def _start_health_server() -> None:
     """Start HTML dashboard + JSON API server in a background thread."""
 
     class Handler(BaseHTTPRequestHandler):
+        def _send_json(self, data) -> None:
+            body = json.dumps(data).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_GET(self):
             if self.path == "/api/stats" or self.path.startswith("/api/stats?"):
-                body = _serialize_stats()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                self._send_json(json.loads(_serialize_stats()))
+
+            elif self.path.startswith("/api/balance"):
+                self._send_json({
+                    "balance": _stats.get("wallet_balance", 0.0),
+                    "mode":    _stats.get("mode", "DRY RUN"),
+                })
+
+            elif self.path.startswith("/api/trades"):
+                self._send_json(trade_db.get_trades(50))
+
+            elif self.path.startswith("/api/errors"):
+                self._send_json(list(_error_log))
+
             else:
                 body = _render_html().encode("utf-8")
                 self.send_response(200)
