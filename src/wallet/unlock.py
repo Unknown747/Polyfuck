@@ -78,8 +78,11 @@ def main():
         network  = wallet.get("network", f"Polygon (chain {chain_id})")
         print(f"  Network:  {network}")
         print()
-        print(f"  Private Key: {wallet['private_key']}")
-        print(f"  Mnemonic:    {wallet.get('mnemonic', 'N/A')}")
+        pk = wallet['private_key']
+        print(f"  Private Key: {pk[:8]}...{pk[-6:]}  (masked — copy full value from Replit Secrets)")
+        mn = wallet.get('mnemonic', 'N/A')
+        mn_masked = mn[:8] + "..." if mn and mn != 'N/A' else mn
+        print(f"  Mnemonic:    {mn_masked}  (masked — store securely offline)")
         print()
         print("⚠️  NEVER share these credentials with anyone.")
         print("⚠️  Copy POLY_PRIVATE_KEY to Replit Secrets, then delete wallet files.")

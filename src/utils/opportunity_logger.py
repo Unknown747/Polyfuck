@@ -27,9 +27,21 @@ def _ensure_csv_header() -> None:
 _ensure_csv_header()
 
 
+_CSV_INJECT_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _sanitize_cell(value: str) -> str:
+    """Strip leading characters that trigger CSV formula injection in spreadsheets."""
+    value = str(value)
+    while value and value[0] in _CSV_INJECT_PREFIXES:
+        value = value[1:]
+    return value
+
+
 def _write(row: dict) -> None:
+    safe_row = {k: (_sanitize_cell(v) if isinstance(v, str) else v) for k, v in row.items()}
     with open(_CSV_PATH, "a", newline="") as f:
-        csv.DictWriter(f, fieldnames=_CSV_FIELDS).writerow(row)
+        csv.DictWriter(f, fieldnames=_CSV_FIELDS).writerow(safe_row)
     with open(_JSON_PATH, "a") as f:
         f.write(json.dumps(row) + "\n")
 
