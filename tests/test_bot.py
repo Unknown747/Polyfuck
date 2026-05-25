@@ -217,6 +217,19 @@ class TestTrader:
         with patch.object(Config, "MAX_DAILY_LOSS_USD", 2.0):
             assert trader._check_safety_limits(0.5) is False
 
+    def test_safety_limit_daily_loss_does_not_halt_on_profit(self):
+        """Regression: positive P&L must NOT trigger the daily-loss halt.
+        Bug was: abs(daily_pnl) > MAX_DAILY_LOSS — halted when profitable.
+        Fix:     daily_pnl < -MAX_DAILY_LOSS — only halts on losses.
+        """
+        trader = Trader()
+        trader._daily_pnl = +5.0  # very profitable day
+        with patch.object(Config, "MAX_DAILY_LOSS_USD", 2.0), \
+             patch.object(Config, "MAX_POSITION_USD", 10.0), \
+             patch.object(Config, "MAX_OPEN_POSITIONS", 10), \
+             patch.object(Config, "MAX_TOTAL_EXPOSURE_USD", 100.0):
+            assert trader._check_safety_limits(0.5) is True  # must NOT halt
+
     def test_safety_limit_open_positions(self):
         trader = Trader()
         trader._open_position_count = 4
