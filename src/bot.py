@@ -692,9 +692,9 @@ async function fetchStats(){
     const bal=parseFloat(s.wallet_balance||0);
     const exp=parseFloat(s.exposure||0);
     const avail=s.mode==='LIVE'?Math.max(0,bal-exp):null;
-    document.getElementById('b-wallet').textContent=s.mode==='DRY RUN'?'N/A':'$'+bal.toFixed(2);
+    document.getElementById('b-wallet').textContent=s.mode==='DRY RUN'?'DRY RUN':'$'+bal.toFixed(2);
     document.getElementById('b-exp-val').textContent='$'+exp.toFixed(2);
-    document.getElementById('b-avail').textContent=avail!==null?'$'+avail.toFixed(2):'N/A';
+    document.getElementById('b-avail').textContent=s.mode==='DRY RUN'?'DRY RUN':(avail!==null?'$'+avail.toFixed(2):'N/A');
     document.getElementById('b-red').textContent='$'+parseFloat(s.redeemed||0).toFixed(2);
 
     // Global summary

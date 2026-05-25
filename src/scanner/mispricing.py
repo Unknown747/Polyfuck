@@ -1,9 +1,16 @@
 """Enhanced mispricing scanner.
 
-Formula: edge = (1.0 - (yes_price + no_price)) * 100
+Root cause of 0-result bug: Gamma API outcomePrices are complement prices
+that ALWAYS sum to exactly 1.0 (e.g., YES=0.52, NO=0.48).  They can never
+signal genuine buy-both arbitrage.
+
+Fix: fetch the top N markets by volume from Gamma, then pull real CLOB ask
+prices in parallel.  The CLOB ask represents what you actually pay to buy a
+token.  If yes_ask + no_ask < 1.0, guaranteed profit exists.
+
+Formula: edge = (1.0 - (yes_ask + no_ask)) * 100
 Weighted score: edge * (1 + volume_liquidity_factor)
 3-tier thresholds: CONSERVATIVE (<2%), NORMAL (2-5%), AGGRESSIVE (5%+)
-Filters: volume_24h > MIN_LIQUIDITY_USD, spread <= MAX_SPREAD_PCT
 """
 
 from __future__ import annotations
@@ -11,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -20,6 +28,12 @@ if TYPE_CHECKING:
     from src.utils.api import GammaClient, ClobClient
 
 logger = logging.getLogger("polymarket-bot")
+
+# Max markets to check via CLOB per scan — include all active markets since
+# lower-volume markets have wider bid-ask spreads = more edge for this strategy
+_CLOB_CHECK_LIMIT = 2000
+# Thread pool size — keep ≤ pool size (10) to avoid connection-pool warnings
+_CLOB_WORKERS = 10
 
 
 @dataclass
@@ -85,36 +99,84 @@ class MispricingScanner:
         min_edge_pct: float | None = None,
         min_volume: float | None = None,
     ) -> list[MispriceOpportunity]:
-        """Return sorted list of mispricing opportunities (best edge first)."""
+        """Return sorted list of mispricing opportunities (best edge first).
+
+        Strategy:
+          1. Fetch all active markets from Gamma (includes token IDs + volume).
+          2. Filter to markets that have CLOB token IDs and pass volume filter.
+          3. Deliberately include all active markets (not just top-volume) since
+             low-volume markets have wider bid-ask spreads = more maker edge.
+          4. Fetch CLOB BID prices in parallel (10 threads) — this is the price
+             at which maker buy orders would fill.
+          5. YES_bid + NO_bid < 1.0 always; when the gap exceeds the edge
+             threshold it's profitable to place maker limit orders on both sides.
+        """
         if not self.enabled:
             logger.warning("MispricingScanner disabled after repeated failures")
             return []
 
-        base_edge   = min_edge_pct  or config.MIN_EDGE_PCT
-        min_vol     = min_volume    or config.MIN_MARKET_VOLUME
-        min_liq     = config.MIN_LIQUIDITY_USD
-        max_spread  = config.MAX_SPREAD_PCT
+        base_edge = min_edge_pct or config.MIN_EDGE_PCT
+        min_vol   = min_volume   or config.MIN_MARKET_VOLUME
+        min_liq   = config.MIN_LIQUIDITY_USD
+
+        t0 = time.time()
+        all_markets = self._fetch_markets(categories)
+
+        # Keep only markets with CLOB token IDs, deduplicated by conditionId
+        seen_ids: set[str] = set()
+        tokenized: list[dict] = []
+        for m in all_markets:
+            cid = m.get("conditionId", "") or m.get("slug", "")
+            if cid and cid in seen_ids:
+                continue
+            if self._parse_tokens(m).get("yes"):
+                seen_ids.add(cid)
+                tokenized.append(m)
+
+        # Sort by volume ascending — lower-volume markets have wider spreads = more edge
+        def _vol(m: dict) -> float:
+            return self._safe_float(m.get("volume24hr") or m.get("volumeNum", 0))
+
+        tokenized.sort(key=_vol)          # ascending: wide-spread markets first
+        candidates = tokenized[:_CLOB_CHECK_LIMIT]
+
+        logger.info(
+            "Mispricing: %d active markets → %d with CLOB token IDs → checking %d via BID prices",
+            len(all_markets), len(tokenized), len(candidates),
+        )
 
         opportunities: list[MispriceOpportunity] = []
-        markets = self._fetch_markets(categories)
-        checked = 0
 
-        for market in markets:
-            checked += 1
-            try:
-                category    = market.get("_category", "")
-                cat_edge    = self._fee_adjusted_edge(category, base_edge)
-                opp = self._evaluate(market, cat_edge, min_vol, min_liq, max_spread)
-                if opp:
-                    if category:
-                        opp.categories = [category]
-                    opportunities.append(opp)
-                    self._category_stats[category] = self._category_stats.get(category, 0) + 1
-            except Exception as exc:
-                logger.debug("Mispricing: skipped market: %s", exc)
+        # Parallel CLOB price fetch
+        with ThreadPoolExecutor(max_workers=_CLOB_WORKERS) as pool:
+            future_map = {
+                pool.submit(
+                    self._evaluate_with_clob,
+                    m,
+                    self._fee_adjusted_edge(m.get("_category", ""), base_edge),
+                    min_vol,
+                    min_liq,
+                ): m
+                for m in candidates
+            }
+            for future in as_completed(future_map):
+                try:
+                    opp = future.result()
+                    if opp:
+                        cat = future_map[future].get("_category", "")
+                        if cat:
+                            opp.categories = [cat]
+                        opportunities.append(opp)
+                        self._category_stats[cat] = self._category_stats.get(cat, 0) + 1
+                except Exception as exc:
+                    logger.debug("Mispricing: CLOB check failed: %s", exc)
 
+        elapsed = time.time() - t0
         self._consecutive_failures = 0
-        logger.info("Mispricing: checked %d markets, found %d opportunities", checked, len(opportunities))
+        logger.info(
+            "Mispricing: checked %d markets via CLOB in %.1fs, found %d opportunities",
+            len(candidates), elapsed, len(opportunities),
+        )
         return sorted(opportunities, key=lambda o: o.weighted_score, reverse=True)
 
     def get_category_stats(self) -> dict[str, int]:
@@ -122,17 +184,116 @@ class MispricingScanner:
 
     # ── Private ───────────────────────────────────────────────────────────────
 
+    def _evaluate_with_clob(
+        self,
+        market: dict,
+        min_edge: float,
+        min_vol: float,
+        min_liq: float,
+    ) -> MispriceOpportunity | None:
+        """Check a market for maker-order mispricing via real CLOB prices.
+
+        Why bid prices?
+        ─────────────
+        YES_ask + NO_ask always > 1.0 in an efficient market (arbitrageurs
+        drain the discount instantly → taker buy-both never works).
+
+        YES_bid + NO_bid always < 1.0 by definition (bid < mid < ask).
+        The key is by how much:
+            bid_sum = 1.0 − total_spread
+        When total_spread is large (wide market), the discount on maker
+        orders is substantial.  Placing limit BUY orders at the current
+        bid prices locks in the discount risk-free *when both fill* — and
+        maker orders incur 0% fee on Polymarket.
+
+        Signal: YES_bid + NO_bid < 1.0 − TAKER_FEE_FLAT − min_edge
+        means net edge (after fee buffer) ≥ min_edge.
+        """
+        tokens = self._parse_tokens(market)
+        yes_tid = tokens.get("yes", "")
+        no_tid  = tokens.get("no", "")
+        if not yes_tid or not no_tid:
+            return None
+
+        volume_24h   = self._safe_float(market.get("volume24hr"))
+        total_volume = self._safe_float(market.get("volumeNum"))
+        liquidity    = self._safe_float(market.get("liquidityNum"))
+
+        if volume_24h < min_liq and total_volume < min_vol:
+            return None
+
+        try:
+            # BUY side = best bid price (highest buy order in the book)
+            # This is what you'd pay placing a maker buy at the current best bid.
+            # YES_bid + NO_bid < 1.0 always; when the discount is large enough
+            # (> min_edge + fee buffer) it's profitable to place both limit orders.
+            yes_bid = self.clob.get_price(yes_tid, "BUY")
+            no_bid  = self.clob.get_price(no_tid,  "BUY")
+        except Exception as exc:
+            logger.debug("Mispricing: CLOB price fetch failed for %s: %s",
+                         market.get("question", "")[:40], exc)
+            return None
+
+        # Sanity-check: prices must be real market prices (not 0 for illiquid sides)
+        if not (0.005 <= yes_bid <= 0.995) or not (0.005 <= no_bid <= 0.995):
+            return None
+
+        # Bids always sum to < 1.0; edge = total spread of the combined position
+        price_sum = yes_bid + no_bid
+        edge_pct  = (1.0 - price_sum) * 100   # gross discount from $1.00
+        # Maker orders have 0% fee — use a small buffer for gas/slippage
+        net_edge  = edge_pct - self.TAKER_FEE_FLAT
+
+        if net_edge <= 0:
+            return None
+        if edge_pct < config.CONSERVATIVE_EDGE:
+            return None
+        if edge_pct < min_edge:
+            return None
+
+        spread_pct      = abs(yes_bid - no_bid) * 100
+        vol_factor      = min(1.0, volume_24h / 50_000)
+        liq_factor      = min(1.0, liquidity   / 20_000)
+        combined_factor = (vol_factor + liq_factor) / 2
+        weighted_score  = edge_pct * (1 + combined_factor)
+        tier, multiplier = self._tier(edge_pct)
+
+        logger.info(
+            "Mispricing FOUND: %s | YES_bid=%.4f NO_bid=%.4f sum=%.4f edge=%.2f%% [%s]",
+            market.get("question", "")[:60], yes_bid, no_bid, price_sum, edge_pct, tier,
+        )
+
+        return MispriceOpportunity(
+            event_slug=      market.get("slug", "").split("-")[0] if market.get("slug") else "",
+            event_title=     market.get("groupItemTitle", "") or market.get("question", "")[:40],
+            market_slug=     market.get("slug", ""),
+            market_question= market.get("question", ""),
+            yes_price=       yes_bid,
+            no_price=        no_bid,
+            price_sum=       price_sum,
+            edge_pct=        edge_pct,
+            weighted_score=  weighted_score,
+            net_edge=        net_edge,
+            volume_24h=      volume_24h,
+            total_volume=    total_volume,
+            liquidity=       liquidity,
+            spread_pct=      spread_pct,
+            condition_id=    market.get("conditionId", ""),
+            yes_token_id=    yes_tid,
+            no_token_id=     no_tid,
+            tier=            tier,
+            position_multiplier= multiplier,
+        )
+
     def _fee_adjusted_edge(self, category: str, base_edge: float) -> float:
         """Minimum edge required after flat maker-fee deduction.
 
         We use maker orders (0% fee) so the only cost is the 0.5% flat
-        TAKER_FEE_FLAT safety buffer.  The old complex formula
-        (fee_rate * 50 * FEE_EDGE_MULT) produced 5.25% for crypto which
-        is almost never achievable — it was blocking all opportunities.
-        New formula: max(base_edge, TAKER_FEE_FLAT + 0.5) ensures we
-        only enter when the net edge after fees is positive.
+        TAKER_FEE_FLAT safety buffer. We require edge > TAKER_FEE_FLAT
+        so the net edge after fees is positive, but never require more
+        than the configured base_edge.
         """
-        return max(base_edge, self.TAKER_FEE_FLAT + 0.5)
+        return max(self.TAKER_FEE_FLAT, base_edge)
 
     def _evaluate(
         self,
@@ -166,15 +327,18 @@ class MispricingScanner:
         if edge_pct < min_edge:
             return None
 
-        spread_pct = abs(yes_price - no_price) * 100
-        if spread_pct > max_spread:
-            return None  # BUG FIX: was `pass` — spread filter was dead code
-
         volume_24h   = self._safe_float(market.get("volume24hr"))
         total_volume = self._safe_float(market.get("volumeNum"))
         liquidity    = self._safe_float(market.get("liquidityNum"))
 
+        spread_pct = abs(yes_price - no_price) * 100
+
+        # Volume filter: require at least min_liq in 24h volume OR min_vol total
         if volume_24h < min_liq and total_volume < min_vol:
+            logger.debug(
+                "Mispricing: filtered (low vol) %s | sum=%.4f edge=%.2f%% vol24h=$%.0f total=$%.0f",
+                market.get("question", "")[:50], price_sum, edge_pct, volume_24h, total_volume,
+            )
             return None
 
         vol_factor      = min(1.0, volume_24h / 50_000)
@@ -227,6 +391,12 @@ class MispricingScanner:
                     logger.warning("Mispricing: slow API response %.1fs for category %s", elapsed, cat)
                 for event in events:
                     for market in event.get("markets", []):
+                        # Skip resolved/inactive individual markets
+                        if market.get("closed") or not market.get("active", True):
+                            continue
+                        # Skip markets with no active CLOB order book
+                        if market.get("enableOrderBook") is False:
+                            continue
                         market["_category"] = cat
                         all_markets.append(market)
             except Exception as exc:

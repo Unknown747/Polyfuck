@@ -166,10 +166,10 @@ class Orchestrator:
             )
             threads.append(t)
 
-        # Correlated: run every CORRELATED_SCAN_EVERY scans
+        # Correlated: run on first scan and then every CORRELATED_SCAN_EVERY scans
         if (config.CORRELATED_ARB_ENABLED
                 and self._health["correlated"].is_ok
-                and self._scan_count % config.CORRELATED_SCAN_EVERY == 0):
+                and (self._scan_count == 1 or self._scan_count % config.CORRELATED_SCAN_EVERY == 0)):
             t = threading.Thread(
                 target=self._run_correlated, args=(cats, results, errors), daemon=True
             )
