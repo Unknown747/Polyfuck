@@ -14,11 +14,3 @@ python-dotenv
 requests
 rich
 web3
-eth-account
-numpy
-pandas
-py-clob-client-v2
-python-dotenv
-requests
-rich
-web3
