@@ -6,4 +6,3 @@ python-dotenv>=1.2.2
 rich>=13.0.0
 pandas>=2.0.0
 numpy>=1.24.0
-web3>=7.15.0
