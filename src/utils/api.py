@@ -1,6 +1,8 @@
 """Polymarket API clients — Gamma (discovery), CLOB (trading), Data (analytics)."""
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from typing import Any
 
 from src.config import config
@@ -12,13 +14,29 @@ except ImportError:
     HAS_OFFICIAL_CLIENT = False
 
 
+def _make_session() -> requests.Session:
+    """Create a requests Session with automatic retry on transient errors."""
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=1.0,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers.update({"Accept": "application/json"})
+    return session
+
+
 class GammaClient:
     """Public Gamma API client — no auth required. Market discovery and metadata."""
 
     def __init__(self):
         self.base_url = config.GAMMA_API_URL
-        self.session = requests.Session()
-        self.session.headers.update({"Accept": "application/json"})
+        self.session = _make_session()
 
     def _get(self, path: str, params: dict | None = None) -> Any:
         resp = self.session.get(f"{self.base_url}{path}", params=params, timeout=15)
@@ -70,6 +88,7 @@ class ClobClient:
         self.address: str = ""
         self._authenticated = False
         self._client: Any = None
+        self._public_session = _make_session()
 
         if private_key and HAS_OFFICIAL_CLIENT:
             self.authenticate(private_key)
@@ -112,11 +131,20 @@ class ClobClient:
         return self.address
 
     # === Public endpoints (no auth required) ===
+    # These use a direct HTTP fallback so they work even without a private key.
+
+    def _public_get(self, path: str, params: dict | None = None) -> Any:
+        """Direct HTTP GET against the CLOB REST API — no auth needed."""
+        resp = self._public_session.get(
+            f"{self.base_url}{path}", params=params, timeout=15
+        )
+        resp.raise_for_status()
+        return resp.json()
 
     def get_orderbook(self, token_id: str) -> dict:
         if self._client:
             return self._client.get_order_book(token_id)
-        raise RuntimeError("Not authenticated")
+        return self._public_get("/book", {"token_id": token_id})
 
     def get_price(self, token_id: str, side: str = "BUY") -> float:
         if self._client:
@@ -124,29 +152,33 @@ class ClobClient:
             if isinstance(result, dict) and "price" in result:
                 return float(result["price"])
             return float(result) if result else 0.0
-        raise RuntimeError("Not authenticated")
+        data = self._public_get("/price", {"token_id": token_id, "side": side})
+        return float(data.get("price", 0) or 0)
 
     def get_midpoint(self, token_id: str) -> float:
         if self._client:
             return self._client.get_midpoint(token_id)
-        raise RuntimeError("Not authenticated")
+        data = self._public_get("/midpoint", {"token_id": token_id})
+        return float(data.get("mid", 0) or 0)
 
     def get_spread(self, token_id: str) -> float:
         if self._client:
             return float(self._client.get_spread(token_id))
-        raise RuntimeError("Not authenticated")
+        data = self._public_get("/spread", {"token_id": token_id})
+        return float(data.get("spread", 0) or 0)
 
     def get_last_trade_price(self, token_id: str) -> float:
         if self._client:
             return float(self._client.get_last_trade_price(token_id))
-        raise RuntimeError("Not authenticated")
+        data = self._public_get("/last-trade-price", {"token_id": token_id})
+        return float(data.get("price", 0) or 0)
 
     def get_price_history(self, condition_id: str, interval: str = "1d") -> list[dict]:
         if self._client:
             return self._client.get_prices_history(
                 {"market": condition_id, "interval": interval}
             )
-        raise RuntimeError("Not authenticated")
+        return self._public_get("/prices-history", {"market": condition_id, "interval": interval})
 
     # === Authenticated endpoints ===
 
@@ -193,8 +225,7 @@ class DataClient:
 
     def __init__(self):
         self.base_url = config.DATA_API_URL
-        self.session = requests.Session()
-        self.session.headers.update({"Accept": "application/json"})
+        self.session = _make_session()
 
     def _get(self, path: str, params: dict | None = None) -> Any:
         resp = self.session.get(f"{self.base_url}{path}", params=params, timeout=15)

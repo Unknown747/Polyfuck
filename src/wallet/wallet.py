@@ -94,8 +94,14 @@ def load_wallet() -> dict:
             "POLY_PRIVATE_KEY to Replit Secrets."
         )
 
-    with open(KEYS_FILE) as f:
-        return json.load(f)
+    try:
+        with open(KEYS_FILE) as f:
+            return json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"wallet.json is corrupted or empty ({e}). "
+            "Delete it and run 'python -m src.wallet.wallet' to create a new one."
+        ) from e
 
 
 def sign_message(private_key: str, message: str) -> str:

@@ -186,6 +186,10 @@ class Trader:
                 condition_id=opp.condition_id,
             )
 
+            if not yes_trade:
+                console.print("[red]YES leg failed — aborting arbitrage to avoid unhedged position.[/]")
+                return None
+
             no_trade = self._place_order(
                 token_id=opp.no_token_id,
                 side="BUY",
@@ -193,6 +197,24 @@ class Trader:
                 price=opp.no_price,
                 condition_id=opp.condition_id,
             )
+
+            if not no_trade:
+                # NO leg failed: cancel the YES order immediately to avoid a naked directional position
+                if yes_trade.order_id:
+                    try:
+                        self.clob.cancel_order(yes_trade.order_id)
+                        console.print(
+                            f"[yellow]NO leg failed — cancelled YES order {yes_trade.order_id} "
+                            "to avoid unhedged position.[/]"
+                        )
+                    except Exception as cancel_err:
+                        console.print(
+                            f"[red]⚠️  NO leg failed AND cancel of YES order failed: {cancel_err}. "
+                            "Manual intervention may be required![/]"
+                        )
+                else:
+                    console.print("[yellow]NO leg failed — YES order has no ID to cancel; check open orders![/]")
+                return None
 
             if yes_trade and no_trade:
                 yes_trade.market_question = opp.market_question

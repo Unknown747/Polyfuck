@@ -542,14 +542,25 @@ class MarketScanner:
         )
 
     def _hours_to_close(self, market: dict) -> float:
-        """Hours until market closes. Returns inf if unknown, <0 if expired."""
+        """Hours until market closes. Returns inf if unknown, <0 if expired.
+
+        BUG FIX: datetime.utcnow() is timezone-naive and deprecated since
+        Python 3.12. Using timezone-aware datetime.now(UTC) ensures correct
+        comparison when the API returns UTC timestamps.
+        """
         raw = market.get("endDate") or market.get("endDateIso") or ""
         if not raw:
             return float("inf")
         try:
-            s = str(raw).rstrip("Z").replace("+00:00", "")
-            dt = datetime.datetime.fromisoformat(s if "T" in s else s + "T00:00:00")
-            delta = dt - datetime.datetime.utcnow()
+            s = str(raw).strip()
+            # Normalise to an aware UTC datetime regardless of input format
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.datetime.fromisoformat(s if "T" in s else s + "T00:00:00+00:00")
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            delta = dt - now
             return delta.total_seconds() / 3600
         except Exception:
             return float("inf")

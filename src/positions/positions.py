@@ -104,7 +104,7 @@ class PositionTracker:
                     if pos.size > 0:
                         positions.append(pos)
                         self._position_cache[pos.condition_id] = pos
-                except (ValueError, TypeError) as e:
+                except (ValueError, TypeError, KeyError) as e:
                     console.print(f"[yellow]Skipping malformed position: {e}[/]")
                     continue
 
