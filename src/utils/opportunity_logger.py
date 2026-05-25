@@ -56,8 +56,8 @@ def log_mispricing(
     row = {
         "timestamp":      time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
         "type":           "mispricing",
-        "market":         opp.market_question[:80],
-        "category":       category,
+        "market":         _sanitize_cell(opp.market_question[:80]),
+        "category":       _sanitize_cell(category),
         "edge_pct":       round(opp.edge_pct, 4),
         "yes_price":      round(opp.yes_price, 4),
         "no_price":       round(opp.no_price, 4),
@@ -80,8 +80,8 @@ def log_near_resolved(
     row = {
         "timestamp":      time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
         "type":           "near_resolved",
-        "market":         opp.market_question[:80],
-        "category":       category,
+        "market":         _sanitize_cell(opp.market_question[:80]),
+        "category":       _sanitize_cell(category),
         "edge_pct":       round(opp.return_pct, 4),
         "yes_price":      round(opp.winning_price, 4),
         "no_price":       round(1.0 - opp.winning_price, 4),
