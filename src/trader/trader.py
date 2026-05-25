@@ -47,14 +47,45 @@ class Trader:
         "geopolitics": 0.0,
     }
 
+    _DAILY_STATE_FILE = "logs/daily_state.json"
+
     def __init__(self, clob: ClobClient | None = None):
         self.clob = clob or ClobClient()
         self._trade_log: list[Trade] = []
-        self._daily_pnl: float = 0.0
         self._daily_trades: int = 0
-        # BUG FIX: track open positions separately from daily trade count
         self._open_position_count: int = 0
         self._total_exposure_usd: float = 0.0
+        # Load persisted daily PnL so restarts don't reset the loss limit
+        self._daily_pnl: float = self._load_daily_pnl()
+
+    def _load_daily_pnl(self) -> float:
+        """Load today's PnL from disk. Returns 0 if no file or it's from a previous day."""
+        import json, datetime
+        try:
+            path = __import__("pathlib").Path(self._DAILY_STATE_FILE)
+            if not path.exists():
+                return 0.0
+            data = json.loads(path.read_text())
+            saved_date = data.get("date", "")
+            today = datetime.date.today().isoformat()
+            if saved_date != today:
+                return 0.0
+            return float(data.get("daily_pnl", 0.0))
+        except Exception:
+            return 0.0
+
+    def _persist_daily_pnl(self) -> None:
+        """Write today's PnL to disk so restarts don't reset the loss limit."""
+        import json, datetime
+        try:
+            path = __import__("pathlib").Path(self._DAILY_STATE_FILE)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({
+                "date": datetime.date.today().isoformat(),
+                "daily_pnl": self._daily_pnl,
+            }))
+        except Exception:
+            pass
 
     def estimate_fee(self, price: float, size: float, category: str = "crypto") -> float:
         """Estimate taker fee for a trade.
@@ -166,6 +197,9 @@ class Trader:
             console.print("[red]Not authenticated. Call authenticate() first.[/]")
             return None
 
+        if not self._check_live_balance(investment_usd):
+            return None
+
         try:
             # Split investment proportionally by price so both sides produce
             # the same number of shares (delta-neutral arbitrage).
@@ -221,6 +255,7 @@ class Trader:
                 yes_trade.fee_estimate = profit_calc["total_fees"]
                 self._trade_log.append(yes_trade)
                 self._daily_pnl -= investment_usd
+                self._persist_daily_pnl()
                 self._daily_trades += 1
                 self._open_position_count += 1
                 self._total_exposure_usd += investment_usd
@@ -341,6 +376,7 @@ class Trader:
                 result.market_question = opp.market_question
                 self._trade_log.append(result)
                 self._daily_pnl -= investment_usd
+                self._persist_daily_pnl()
                 self._daily_trades += 1
                 self._open_position_count += 1
                 self._total_exposure_usd += investment_usd
@@ -356,6 +392,7 @@ class Trader:
     def record_redemption(self, amount_usd: float) -> None:
         """Record that a redemption added funds back to the account."""
         self._daily_pnl += amount_usd
+        self._persist_daily_pnl()
         self._open_position_count = max(0, self._open_position_count - 1)
         self._total_exposure_usd = max(0.0, self._total_exposure_usd - amount_usd)
 
@@ -439,6 +476,22 @@ class Trader:
         except Exception as e:
             console.print(f"[red]Order failed: {e}[/]")
             return None
+
+    def _check_live_balance(self, investment_usd: float) -> bool:
+        """Verify USDC balance and MATIC gas before placing a live order."""
+        try:
+            balance_data = self.clob.get_balance_allowance("COLLATERAL")
+            usdc_balance = float(balance_data.get("balance", 0) or 0)
+            if usdc_balance < investment_usd:
+                console.print(
+                    f"[red]Insufficient USDC: have ${usdc_balance:.2f}, "
+                    f"need ${investment_usd:.2f}. Top up your wallet.[/]"
+                )
+                return False
+        except Exception as e:
+            console.print(f"[yellow]⚠️  Could not verify USDC balance: {e} — proceeding with caution.[/]")
+
+        return True
 
     def _check_safety_limits(self, investment_usd: float) -> bool:
         """Check if a new trade is within all safety limits."""

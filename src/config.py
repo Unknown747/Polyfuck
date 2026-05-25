@@ -68,11 +68,11 @@ class Config:
     # polygon.drpc.org is the most reliable public RPC from cloud environments.
     RPC_URL: str = os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org")
 
-    # Ordered fallback list — tried in sequence if primary RPC fails
+    # Ordered fallback list — tried in sequence if primary RPC fails.
+    # Verified reachable from Replit cloud (polygon-mainnet.public.blastapi.io
+    # and rpc-mainnet.maticvigil.com are NOT reachable from Replit servers).
     RPC_FALLBACKS: list[str] = [
         os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org"),
-        "https://polygon-mainnet.public.blastapi.io",
-        "https://rpc-mainnet.maticvigil.com",
         "https://polygon-bor-rpc.publicnode.com",
     ]
 

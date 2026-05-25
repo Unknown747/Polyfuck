@@ -209,28 +209,57 @@ class AutoRedeemer:
             nonce     = w3.eth.get_transaction_count(self.address)
             gas_price = self._get_gas_params(w3)
 
-            tx = ctf.functions.redeemPositions(
-                config.USDC_BRIDGED,    # collateralToken (USDC.e on Polygon)
-                bytes(32),              # parentCollectionId = bytes32(0)
-                condition_bytes,        # conditionId
-                [index_set],            # indexSets
-            ).build_transaction({
-                "from":    self.address,
-                "nonce":   nonce,
-                "gas":     self._GAS_LIMIT,
-                "chainId": config.CHAIN_ID,
-                **gas_price,
-            })
+            # Polymarket markets use either Native USDC or Bridged USDC.e as collateral.
+            # Try Native USDC first (newer markets), fall back to Bridged USDC.e.
+            collateral_candidates = [config.USDC_NATIVE, config.USDC_BRIDGED]
+            receipt = None
+            tx_hex  = ""
 
-            signed  = w3.eth.account.sign_transaction(tx, private_key=self.private_key)
-            tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-            tx_hex  = tx_hash.hex()
+            for collateral in collateral_candidates:
+                try:
+                    tx = ctf.functions.redeemPositions(
+                        collateral,   # collateralToken
+                        bytes(32),    # parentCollectionId = bytes32(0)
+                        condition_bytes,
+                        [index_set],
+                    ).build_transaction({
+                        "from":    self.address,
+                        "nonce":   nonce,
+                        "gas":     self._GAS_LIMIT,
+                        "chainId": config.CHAIN_ID,
+                        **gas_price,
+                    })
 
-            receipt = w3.eth.wait_for_transaction_receipt(
-                tx_hash, timeout=120, poll_latency=3
-            )
+                    signed  = w3.eth.account.sign_transaction(tx, private_key=self.private_key)
+                    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    tx_hex  = tx_hash.hex()
 
-            if receipt.status == 1:
+                    receipt = w3.eth.wait_for_transaction_receipt(
+                        tx_hash, timeout=120, poll_latency=3
+                    )
+
+                    if receipt.status == 1:
+                        logger.info(
+                            "Redeemed via collateral %s for %s",
+                            collateral[:10], pos.condition_id
+                        )
+                        break  # success — no need to try the other token
+                    else:
+                        logger.warning(
+                            "Redemption reverted with collateral %s, trying next...",
+                            collateral[:10]
+                        )
+                        nonce += 1   # bump nonce for the retry tx
+                        receipt = None
+                except Exception as leg_err:
+                    logger.warning(
+                        "Redemption leg failed (collateral %s): %s — trying next",
+                        collateral[:10], leg_err
+                    )
+                    nonce += 1
+                    continue
+
+            if receipt is not None and receipt.status == 1:
                 result.status  = "success"
                 result.tx_hash = tx_hex
                 logger.info(
@@ -245,8 +274,11 @@ class AutoRedeemer:
                 )
             else:
                 result.status = "failed"
-                result.error  = f"transaction reverted (tx {tx_hex[:12]})"
-                console.print(f"  [red]❌ Redemption reverted[/] for {pos.title[:40]}")
+                result.error  = (
+                    f"all collateral attempts reverted (last tx {tx_hex[:12]})"
+                    if tx_hex else "no transaction was sent"
+                )
+                console.print(f"  [red]❌ Redemption failed for all collateral tokens[/] — {pos.title[:40]}")
 
         except Exception as e:
             result.status = "failed"
