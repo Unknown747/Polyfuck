@@ -2,6 +2,7 @@
 
 import json
 import time
+import datetime
 from dataclasses import dataclass, field
 from typing import Any
 from rich.console import Console
@@ -74,6 +75,49 @@ class CorrelatedArbitrage:
     @property
     def is_actionable(self) -> bool:
         return abs(self.edge_pct) > 3.0
+
+
+@dataclass
+class NearResolvedOpportunity:
+    """A market near resolution — one side is priced very close to $1.00.
+
+    Strategy: buy the high-confidence side (e.g. YES @ $0.96) and collect
+    $1.00 when the market resolves. Return ≈ 1–6% with very low risk.
+    Post as a maker limit order (0% fee) to maximise profit.
+    """
+    condition_id:      str
+    market_question:   str
+    event_title:       str
+    market_slug:       str
+    winning_side:      str    # "YES" or "NO"
+    winning_price:     float  # current market price, e.g. 0.96
+    winning_token_id:  str
+    return_pct:        float  # (1.0 - price) / price * 100
+    volume_24h:        float
+    end_date:          str    # ISO string from API, may be empty
+    hours_to_close:    float  # inf if unknown
+
+    @property
+    def is_actionable(self) -> bool:
+        return self.winning_price >= 0.90 and self.return_pct > 0
+
+    @property
+    def maker_price(self) -> float:
+        """Price 1 tick lower than market — qualifies for 0% maker fee."""
+        return round(max(0.01, self.winning_price - 0.01), 2)
+
+    @property
+    def maker_return_pct(self) -> float:
+        """Return % if filled at maker price."""
+        p = self.maker_price
+        return ((1.0 - p) / p) * 100 if p > 0 else 0.0
+
+    def __str__(self) -> str:
+        return (
+            f"[NEAR_RESOLVED/{self.winning_side}] {self.market_question} "
+            f"| Price={self.winning_price:.3f} Return={self.return_pct:.2f}% "
+            f"| Closes in {self.hours_to_close:.0f}h"
+        )
 
 
 class MarketScanner:
@@ -400,6 +444,151 @@ class MarketScanner:
     def _get_event_title(self, market: dict) -> str:
         """Extract event title from market data."""
         return market.get("groupItemTitle", "") or market.get("question", "").split("?")[0] + "?"
+
+    # ── Near-Resolved Strategy ────────────────────────────────────────────────
+
+    def scan_near_resolved(
+        self,
+        min_confidence: float = 0.94,
+        max_hours: float = 72.0,
+        min_volume: float = 200.0,
+        categories: list[str] | None = None,
+    ) -> list[NearResolvedOpportunity]:
+        """Scan for markets where one outcome is priced > min_confidence.
+
+        Strategy: buy the high-confidence side (e.g. YES @ $0.96) and
+        collect $1.00 on resolution. Return ≈ 1-6% with very low directional
+        risk. Post as maker limit order (0% fee) to maximise net return.
+
+        Args:
+            min_confidence: Minimum price to qualify (default 0.94 = 94% sure)
+            max_hours:      Only include markets closing within this window
+            min_volume:     24h volume threshold to ensure liquidity
+            categories:     Category filter (same as scan_all)
+        """
+        console.print("[bold cyan]Scanning for near-resolved markets...[/]")
+        opportunities: list[NearResolvedOpportunity] = []
+        markets = self._fetch_markets(categories)
+
+        for market in markets:
+            try:
+                opp = self._check_near_resolved(market, min_confidence, min_volume, max_hours)
+                if opp:
+                    opportunities.append(opp)
+            except Exception as e:
+                console.print(f"[dim yellow]Warning: near-resolved check skipped: {e}[/]")
+                continue
+
+        console.print(f"[green]Found {len(opportunities)} near-resolved opportunities[/]")
+        return sorted(opportunities, key=lambda x: x.return_pct, reverse=True)
+
+    def _check_near_resolved(
+        self,
+        market: dict,
+        min_confidence: float,
+        min_volume: float,
+        max_hours: float,
+    ) -> "NearResolvedOpportunity | None":
+        """Check if a single market qualifies as near-resolved."""
+        prices = self._parse_outcome_prices(market)
+        if not prices or len(prices) < 2:
+            return None
+
+        yes_price = prices[0]
+        no_price  = prices[1]
+
+        if yes_price >= min_confidence:
+            winning_side  = "YES"
+            winning_price = yes_price
+        elif no_price >= min_confidence:
+            winning_side  = "NO"
+            winning_price = no_price
+        else:
+            return None
+
+        # Volume filter
+        try:
+            volume_24h   = float(market.get("volume24hr", 0) or 0)
+            total_volume = float(market.get("volumeNum",  0) or 0)
+        except (ValueError, TypeError):
+            volume_24h = total_volume = 0.0
+
+        if volume_24h < min_volume and total_volume < min_volume * 2:
+            return None
+
+        # Time-to-close filter
+        hours_to_close = self._hours_to_close(market)
+        if hours_to_close < 0:
+            return None  # already expired
+        if hours_to_close != float("inf") and hours_to_close > max_hours:
+            return None
+
+        tokens        = self._parse_token_ids(market)
+        winning_token = tokens.get("yes", "") if winning_side == "YES" else tokens.get("no", "")
+        return_pct    = ((1.0 - winning_price) / winning_price) * 100
+
+        return NearResolvedOpportunity(
+            condition_id=market.get("conditionId", ""),
+            market_question=market.get("question", ""),
+            event_title=self._get_event_title(market),
+            market_slug=market.get("slug", ""),
+            winning_side=winning_side,
+            winning_price=winning_price,
+            winning_token_id=winning_token,
+            return_pct=return_pct,
+            volume_24h=volume_24h,
+            end_date=str(market.get("endDate", "") or ""),
+            hours_to_close=hours_to_close,
+        )
+
+    def _hours_to_close(self, market: dict) -> float:
+        """Hours until market closes. Returns inf if unknown, <0 if expired."""
+        raw = market.get("endDate") or market.get("endDateIso") or ""
+        if not raw:
+            return float("inf")
+        try:
+            s = str(raw).rstrip("Z").replace("+00:00", "")
+            dt = datetime.datetime.fromisoformat(s if "T" in s else s + "T00:00:00")
+            delta = dt - datetime.datetime.utcnow()
+            return delta.total_seconds() / 3600
+        except Exception:
+            return float("inf")
+
+
+def display_near_resolved(opportunities: list[NearResolvedOpportunity], limit: int = 10) -> None:
+    """Display near-resolved opportunities in a rich table."""
+    if not opportunities:
+        console.print("[yellow]No near-resolved opportunities found.[/]")
+        return
+
+    table = Table(title="📅 Near-Resolved Markets (Low-Risk)")
+    table.add_column("Market", style="cyan", max_width=45, no_wrap=True)
+    table.add_column("Side",   justify="center", style="bold")
+    table.add_column("Price",  justify="right",  style="green")
+    table.add_column("Maker $", justify="right", style="bold green")
+    table.add_column("Return", justify="right",  style="bold yellow")
+    table.add_column("Maker Ret", justify="right", style="bold cyan")
+    table.add_column("Closes",  justify="right")
+    table.add_column("Volume", justify="right")
+
+    for opp in opportunities[:limit]:
+        closes = (
+            f"{opp.hours_to_close:.0f}h"
+            if opp.hours_to_close != float("inf")
+            else "?"
+        )
+        table.add_row(
+            opp.market_question[:45],
+            opp.winning_side,
+            f"${opp.winning_price:.3f}",
+            f"${opp.maker_price:.3f}",
+            f"{opp.return_pct:.2f}%",
+            f"{opp.maker_return_pct:.2f}%",
+            closes,
+            f"${opp.volume_24h:,.0f}",
+        )
+
+    console.print(table)
 
 
 def display_opportunities(opportunities: list[Mispricing], limit: int = 20) -> None:

@@ -16,7 +16,10 @@ from rich.logging import RichHandler
 from src.config import config, Config
 from src.utils.api import GammaClient, ClobClient, DataClient
 from src.wallet.wallet import load_wallet, validate_private_key
-from src.scanner.scanner import MarketScanner, Mispricing, display_opportunities
+from src.scanner.scanner import (
+    MarketScanner, Mispricing, NearResolvedOpportunity,
+    display_opportunities, display_near_resolved,
+)
 from src.trader.trader import Trader
 from src.positions.positions import PositionTracker
 from src.redemption.redemption import AutoRedeemer
@@ -61,6 +64,7 @@ class PolymarketBot:
         self._opportunities_found = 0
         self._trades_executed = 0
         self._total_redeemed_usd = 0.0
+        self._near_resolved_found = 0
 
     def start(self) -> None:
         """Start the bot."""
@@ -189,6 +193,19 @@ class PolymarketBot:
                 else:
                     console.print("[dim]No opportunities found. Waiting...[/]")
 
+                # 1b. Near-resolved scan every 3 scans (low-risk, maker-fee strategy)
+                if self._scan_count % 3 == 0:
+                    near_resolved = self.scanner.scan_near_resolved(
+                        categories=config.SCAN_CATEGORIES,
+                    )
+                    if near_resolved:
+                        self._near_resolved_found += len(near_resolved)
+                        display_near_resolved(near_resolved)
+                        best_nr = near_resolved[0]
+                        nr_trade = self.trader.execute_near_resolved_trade(best_nr)
+                        if nr_trade:
+                            self._trades_executed += 1
+
                 # 2. Auto-redeem resolved positions every N scans
                 if (
                     config.AUTO_REDEEM
@@ -233,6 +250,7 @@ class PolymarketBot:
             f"\n[bold]── Status ──[/]\n"
             f"  Scans: {self._scan_count} | "
             f"Opportunities: {self._opportunities_found} | "
+            f"Near-Resolved: {self._near_resolved_found} | "
             f"Trades: {self._trades_executed}\n"
             f"  Open positions: {daily['open_positions']} / {config.MAX_OPEN_POSITIONS} | "
             f"Exposure: ${daily['total_exposure_usd']:.2f} / "
@@ -245,6 +263,7 @@ class PolymarketBot:
         _stats.update({
             "scans": self._scan_count,
             "opportunities": self._opportunities_found,
+            "near_resolved": self._near_resolved_found,
             "trades": self._trades_executed,
             "open_positions": daily["open_positions"],
             "max_positions": config.MAX_OPEN_POSITIONS,
@@ -295,6 +314,7 @@ class PolymarketBot:
 _stats: dict = {
     "scans": 0,
     "opportunities": 0,
+    "near_resolved": 0,
     "trades": 0,
     "open_positions": 0,
     "max_positions": 4,
@@ -347,8 +367,12 @@ def _render_html() -> str:
     <div class="value">{s['scans']}</div>
   </div>
   <div class="card">
-    <div class="label">Peluang</div>
+    <div class="label">Peluang Mispricing</div>
     <div class="value">{s['opportunities']}</div>
+  </div>
+  <div class="card">
+    <div class="label">Near-Resolved</div>
+    <div class="value" style="color:#58a6ff">{s['near_resolved']}</div>
   </div>
   <div class="card">
     <div class="label">Trade Dieksekusi</div>

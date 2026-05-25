@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 from src.config import Config
 from src.wallet.wallet import validate_private_key, get_address_from_key
-from src.scanner.scanner import MarketScanner, Mispricing
+from src.scanner.scanner import MarketScanner, Mispricing, NearResolvedOpportunity
 from src.trader.trader import Trader, Trade
 from src.positions.positions import Position
 from src.redemption.redemption import AutoRedeemer, RedemptionResult
@@ -422,6 +422,208 @@ class TestFormatting:
         from src.utils.formatting import format_address
         assert format_address("0x1234567890abcdef1234567890abcdef12345678") == "0x123456...345678"
         assert format_address("") == "N/A"
+
+
+# ──────────────────────────────────────────────────────────────
+# Near-Resolved Strategy Tests
+# ──────────────────────────────────────────────────────────────
+
+def make_near_resolved(
+    winning_side: str = "YES",
+    winning_price: float = 0.96,
+    return_pct: float = 4.17,
+    hours_to_close: float = 24.0,
+    volume_24h: float = 500.0,
+) -> NearResolvedOpportunity:
+    return NearResolvedOpportunity(
+        condition_id="0x" + "d1" * 32,
+        market_question="Will X happen?",
+        event_title="X Event",
+        market_slug="will-x-happen",
+        winning_side=winning_side,
+        winning_price=winning_price,
+        winning_token_id="0xtoken123",
+        return_pct=return_pct,
+        volume_24h=volume_24h,
+        end_date="2026-05-26T00:00:00",
+        hours_to_close=hours_to_close,
+    )
+
+
+class TestNearResolvedOpportunity:
+    def test_maker_price_is_one_tick_below(self):
+        opp = make_near_resolved(winning_price=0.96)
+        assert abs(opp.maker_price - 0.95) < 1e-9
+
+    def test_maker_return_pct_higher_than_taker(self):
+        opp = make_near_resolved(winning_price=0.96)
+        assert opp.maker_return_pct > opp.return_pct
+
+    def test_return_pct_calculated_correctly(self):
+        opp = make_near_resolved(winning_price=0.96)
+        expected = ((1.0 - 0.96) / 0.96) * 100
+        assert abs(opp.return_pct - expected) < 0.01
+
+    def test_winning_side_no(self):
+        opp = make_near_resolved(winning_side="NO", winning_price=0.97)
+        assert opp.winning_side == "NO"
+        assert abs(opp.maker_price - 0.96) < 1e-9
+
+
+class TestNearResolvedScanner:
+    def _make_scanner(self):
+        with patch("src.scanner.scanner.GammaClient"), \
+             patch("src.scanner.scanner.ClobClient"), \
+             patch("src.scanner.scanner.DataClient"):
+            return MarketScanner(config=Config())
+
+    def _market_data(self, yes_price: float, volume: float = 500.0, hours: float = 24.0) -> dict:
+        import datetime
+        close_time = datetime.datetime.utcnow() + datetime.timedelta(hours=hours)
+        return {
+            "conditionId": "0xcond1",
+            "question": "Will this resolve?",
+            "groupItemTitle": "Test Event",
+            "slug": "test-market",
+            "outcomePrices": [str(yes_price), str(round(1.0 - yes_price, 3))],
+            "volume24hr": str(volume),
+            "volumeNum": str(volume * 5),
+            "endDate": close_time.isoformat(),
+            "tokens": [
+                {"token_id": "0xtokenYES", "outcome": "Yes"},
+                {"token_id": "0xtokenNO",  "outcome": "No"},
+            ],
+        }
+
+    def test_qualifies_when_above_threshold(self):
+        scanner = self._make_scanner()
+        market = self._market_data(yes_price=0.96)
+        opp = scanner._check_near_resolved(market, min_confidence=0.94, min_volume=200.0, max_hours=72.0)
+        assert opp is not None
+        assert opp.winning_side == "YES"
+        assert abs(opp.winning_price - 0.96) < 1e-6
+
+    def test_no_opportunity_when_below_threshold(self):
+        scanner = self._make_scanner()
+        market = self._market_data(yes_price=0.90)
+        opp = scanner._check_near_resolved(market, min_confidence=0.94, min_volume=200.0, max_hours=72.0)
+        assert opp is None
+
+    def test_no_opportunity_when_volume_too_low(self):
+        scanner = self._make_scanner()
+        market = self._market_data(yes_price=0.96, volume=10.0)
+        opp = scanner._check_near_resolved(market, min_confidence=0.94, min_volume=200.0, max_hours=72.0)
+        assert opp is None
+
+    def test_no_opportunity_when_too_far_from_close(self):
+        scanner = self._make_scanner()
+        market = self._market_data(yes_price=0.96, hours=200.0)
+        opp = scanner._check_near_resolved(market, min_confidence=0.94, min_volume=200.0, max_hours=72.0)
+        assert opp is None
+
+    def test_qualifies_no_side(self):
+        scanner = self._make_scanner()
+        market = {
+            "conditionId": "0xcond2",
+            "question": "No side wins?",
+            "groupItemTitle": "",
+            "slug": "no-side",
+            "outcomePrices": ["0.03", "0.97"],
+            "volume24hr": "600",
+            "volumeNum": "3000",
+            "endDate": (__import__("datetime").datetime.utcnow() + __import__("datetime").timedelta(hours=10)).isoformat(),
+            "tokens": [
+                {"token_id": "0xtY", "outcome": "Yes"},
+                {"token_id": "0xtN", "outcome": "No"},
+            ],
+        }
+        opp = scanner._check_near_resolved(market, min_confidence=0.94, min_volume=200.0, max_hours=72.0)
+        assert opp is not None
+        assert opp.winning_side == "NO"
+
+    def test_scan_near_resolved_calls_fetch(self):
+        scanner = self._make_scanner()
+        market = self._market_data(yes_price=0.97, volume=800.0, hours=12.0)
+        with patch.object(scanner, "_fetch_markets", return_value=[market]) as mock_fetch:
+            results = scanner.scan_near_resolved(min_confidence=0.94, max_hours=72.0, min_volume=200.0)
+        mock_fetch.assert_called_once()
+        assert len(results) == 1
+
+    def test_hours_to_close_future(self):
+        import datetime
+        scanner = self._make_scanner()
+        future = datetime.datetime.utcnow() + datetime.timedelta(hours=48)
+        market = {"endDate": future.isoformat()}
+        hours = scanner._hours_to_close(market)
+        assert 47.5 < hours < 48.5
+
+    def test_hours_to_close_no_date(self):
+        scanner = self._make_scanner()
+        hours = scanner._hours_to_close({})
+        assert hours == float("inf")
+
+    def test_hours_to_close_expired(self):
+        import datetime
+        scanner = self._make_scanner()
+        past = datetime.datetime.utcnow() - datetime.timedelta(hours=2)
+        market = {"endDate": past.isoformat()}
+        hours = scanner._hours_to_close(market)
+        assert hours < 0
+
+
+class TestNearResolvedTrader:
+    def _make_trader(self):
+        with patch("src.trader.trader.ClobClient"):
+            return Trader(clob=MagicMock())
+
+    def test_dry_run_returns_trade(self):
+        trader = self._make_trader()
+        opp = make_near_resolved()
+        with patch.object(Config, "DRY_RUN", new_callable=lambda: property(lambda self: True)):
+            trade = trader.execute_near_resolved_trade(opp, investment_usd=1.0)
+        assert trade is not None
+        assert trade.status == "dry_run"
+        assert trade.side == "BUY"
+        assert abs(trade.price - opp.maker_price) < 1e-9
+
+    def test_uses_maker_price_by_default(self):
+        trader = self._make_trader()
+        opp = make_near_resolved(winning_price=0.97)
+        with patch.object(Config, "DRY_RUN", new_callable=lambda: property(lambda self: True)):
+            trade = trader.execute_near_resolved_trade(opp, investment_usd=1.0)
+        assert abs(trade.price - 0.96) < 1e-9
+
+    def test_uses_winning_price_when_maker_disabled(self):
+        trader = self._make_trader()
+        opp = make_near_resolved(winning_price=0.96)
+        with patch.object(Config, "DRY_RUN", new_callable=lambda: property(lambda self: True)):
+            trade = trader.execute_near_resolved_trade(opp, investment_usd=1.0, use_maker_price=False)
+        assert abs(trade.price - 0.96) < 1e-9
+
+    def test_respects_max_position_usd(self):
+        trader = self._make_trader()
+        opp = make_near_resolved()
+        with patch.object(Config, "DRY_RUN", new_callable=lambda: property(lambda self: True)), \
+             patch.object(Config, "MAX_POSITION_USD", new_callable=lambda: property(lambda self: 2.0)):
+            trade = trader.execute_near_resolved_trade(opp, investment_usd=50.0)
+        assert trade is not None
+        assert trade.size <= 2.0
+
+    def test_updates_open_position_count(self):
+        trader = self._make_trader()
+        opp = make_near_resolved()
+        before = trader._open_position_count
+        with patch.object(Config, "DRY_RUN", new_callable=lambda: property(lambda self: True)):
+            trader.execute_near_resolved_trade(opp, investment_usd=1.0)
+        assert trader._open_position_count == before + 1
+
+    def test_blocked_by_safety_limits(self):
+        trader = self._make_trader()
+        opp = make_near_resolved()
+        trader._daily_pnl = -99.0
+        with patch.object(Config, "DRY_RUN", new_callable=lambda: property(lambda self: True)):
+            trade = trader.execute_near_resolved_trade(opp, investment_usd=1.0)
+        assert trade is None
 
 
 if __name__ == "__main__":

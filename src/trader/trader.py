@@ -8,7 +8,7 @@ from rich.console import Console
 
 from src.config import config
 from src.utils.api import ClobClient
-from src.scanner.scanner import Mispricing
+from src.scanner.scanner import Mispricing, NearResolvedOpportunity
 
 console = Console()
 
@@ -246,6 +246,89 @@ class Trader:
             return result
         except Exception as e:
             console.print(f"[red]Close position failed: {e}[/]")
+            return None
+
+    def execute_near_resolved_trade(
+        self,
+        opp: NearResolvedOpportunity,
+        investment_usd: float | None = None,
+        use_maker_price: bool = True,
+    ) -> "Trade | None":
+        """Buy the high-confidence side of a near-resolved market.
+
+        Strategy: buy winning side at current price (e.g. $0.96),
+        collect $1.00 when market resolves. Return ≈ 1-6% with low risk.
+
+        Args:
+            use_maker_price: Post 1 tick below market price → 0% maker fee.
+                             Higher return but may not fill immediately.
+        """
+        if investment_usd is None:
+            investment_usd = config.DEFAULT_TRADE_SIZE_USD
+        investment_usd = min(investment_usd, config.MAX_POSITION_USD)
+
+        if not self._check_safety_limits(investment_usd):
+            return None
+
+        buy_price = opp.maker_price if use_maker_price else opp.winning_price
+        actual_return_pct = ((1.0 - buy_price) / buy_price) * 100
+
+        console.print(
+            f"[cyan]📅 Near-Resolved:[/] {opp.market_question[:60]}\n"
+            f"  Buy {opp.winning_side} @ ${buy_price:.2f} "
+            f"({'maker 0% fee' if use_maker_price else 'taker'}) | "
+            f"Est. Return: {actual_return_pct:.2f}% | "
+            f"Closes in: {opp.hours_to_close:.0f}h"
+        )
+
+        if config.DRY_RUN:
+            console.print(
+                f"[yellow]DRY RUN: Would buy {opp.winning_side} "
+                f"@ ${buy_price:.2f} in {opp.market_question[:50]}[/]"
+            )
+            trade = Trade(
+                market_question=opp.market_question,
+                condition_id=opp.condition_id,
+                token_id=opp.winning_token_id,
+                side="BUY",
+                price=buy_price,
+                size=investment_usd,
+                order_type="GTC",
+                status="dry_run",
+            )
+            self._trade_log.append(trade)
+            self._daily_trades += 1
+            self._open_position_count += 1
+            self._total_exposure_usd += investment_usd
+            return trade
+
+        if not self.clob._authenticated:
+            console.print("[red]Not authenticated. Call authenticate() first.[/]")
+            return None
+
+        try:
+            result = self._place_order(
+                token_id=opp.winning_token_id,
+                side="BUY",
+                size=investment_usd,
+                price=buy_price,
+                condition_id=opp.condition_id,
+                order_type="GTC",
+            )
+            if result:
+                result.market_question = opp.market_question
+                self._trade_log.append(result)
+                self._daily_pnl -= investment_usd
+                self._daily_trades += 1
+                self._open_position_count += 1
+                self._total_exposure_usd += investment_usd
+                console.print(
+                    f"[bold green]✅ Near-resolved order placed![/] "
+                    f"Order: {result.order_id}"
+                )
+            return result
+        except Exception as e:
+            console.print(f"[red]Near-resolved trade failed: {e}[/]")
             return None
 
     def record_redemption(self, amount_usd: float) -> None:
