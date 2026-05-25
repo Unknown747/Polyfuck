@@ -31,6 +31,7 @@ class Trade:
     filled_price: float = 0.0
     filled_size: float = 0.0
     fee_estimate: float = 0.0
+    strategy: str = ""
 
 
 class Trader:

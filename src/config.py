@@ -4,16 +4,7 @@ import os
 
 
 class Config:
-    """Bot configuration from environment variables.
-
-    All tuneable values live here. For a $10 USDT capital account, the
-    defaults below are already calibrated:
-      - MAX_POSITION_USD = 3  (max 30% of capital per trade)
-      - DEFAULT_TRADE_SIZE_USD = 2  ($2 per arb leg by default)
-      - MAX_DAILY_LOSS_USD = 2  (hard stop at 20% daily loss)
-      - MAX_OPEN_POSITIONS = 4  (no more than 4 concurrent arb pairs)
-      - MIN_EDGE_PCT = 2.0  (catch tighter edges for small capital)
-    """
+    """Bot configuration from environment variables."""
 
     # === Wallet ===
     PRIVATE_KEY: str = os.getenv("POLY_PRIVATE_KEY", "")
@@ -21,24 +12,22 @@ class Config:
     # === Trading mode ===
     DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 
-    # === Capital & position sizing (calibrated for $10 USDT account) ===
+    # === Capital & position sizing ===
     MAX_POSITION_USD: float = float(os.getenv("MAX_POSITION_USD", "3"))
     DEFAULT_TRADE_SIZE_USD: float = float(os.getenv("DEFAULT_TRADE_SIZE_USD", "2"))
-    MAX_TOTAL_EXPOSURE_USD: float = float(os.getenv("MAX_TOTAL_EXPOSURE_USD", "8"))
+    MAX_TOTAL_EXPOSURE_USD: float = float(os.getenv("MAX_TOTAL_EXPOSURE_USD", "200"))
 
     # === Safety limits ===
-    MAX_DAILY_LOSS_USD: float = float(os.getenv("MAX_DAILY_LOSS_USD", "2"))
+    MAX_DAILY_LOSS_USD: float = float(os.getenv("MAX_DAILY_LOSS_USD", "20"))
     MIN_EDGE_PCT: float = float(os.getenv("MIN_EDGE_PCT", "2.0"))
     MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "4"))
+    MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "10"))
+    POSITION_COOLDOWN_MINUTES: int = int(os.getenv("POSITION_COOLDOWN_MINUTES", "360"))
 
     # === Trailing Stop-Loss ===
-    # Close a position if its current price has dropped >= this % from entry.
-    # Set to 0 to disable.
     TRAILING_STOP_PCT: float = float(os.getenv("TRAILING_STOP_PCT", "30.0"))
 
     # === Auto-Compound ===
-    # After a successful redemption, recalculate trade size as
-    # COMPOUND_PCT × current USDC balance (clamped between MIN/MAX).
     AUTO_COMPOUND: bool = os.getenv("AUTO_COMPOUND", "false").lower() in ("true", "1", "yes")
     COMPOUND_PCT: float = float(os.getenv("COMPOUND_PCT", "0.20"))
     MIN_TRADE_SIZE_USD: float = float(os.getenv("MIN_TRADE_SIZE_USD", "1.0"))
@@ -51,9 +40,6 @@ class Config:
     MIN_MARKET_VOLUME: float = float(os.getenv("MIN_MARKET_VOLUME", "500"))
 
     # === Smart Category Filtering ===
-    # Per-category taker fee rates used to compute a fee-adjusted minimum edge.
-    # effective_min_edge = max(MIN_EDGE_PCT, base_edge + fee_rate * 100 * FEE_EDGE_MULT)
-    # FEE_EDGE_MULT of 1.5 means we require edge ≥ 1.5× the round-trip taker fee.
     CATEGORY_TAKER_FEES: dict = {
         "crypto":      0.07,
         "sports":      0.03,
@@ -69,38 +55,74 @@ class Config:
     AUTO_REDEEM: bool = os.getenv("AUTO_REDEEM", "true").lower() in ("true", "1", "yes")
     REDEEM_CHECK_INTERVAL: int = int(os.getenv("REDEEM_CHECK_INTERVAL", "5"))
 
+    # ─── Strategy Toggles ────────────────────────────────────────────────────
+    MISPRICING_ENABLED: bool    = os.getenv("MISPRICING_ENABLED", "true").lower() in ("true","1","yes")
+    NEAR_RESOLVED_ENABLED: bool = os.getenv("NEAR_RESOLVED_ENABLED", "true").lower() in ("true","1","yes")
+    CORRELATED_ARB_ENABLED: bool= os.getenv("CORRELATED_ARB_ENABLED", "true").lower() in ("true","1","yes")
+    LIQUIDITY_SNIPE_ENABLED: bool=os.getenv("LIQUIDITY_SNIPE_ENABLED", "true").lower() in ("true","1","yes")
+
+    # ─── Mispricing ──────────────────────────────────────────────────────────
+    AGGRESSIVE_EDGE: float  = float(os.getenv("AGGRESSIVE_EDGE",  "5.0"))
+    CONSERVATIVE_EDGE: float= float(os.getenv("CONSERVATIVE_EDGE","1.0"))
+    MIN_LIQUIDITY_USD: float= float(os.getenv("MIN_LIQUIDITY_USD", "5000"))
+    MAX_SPREAD_PCT: float   = float(os.getenv("MAX_SPREAD_PCT",    "2.0"))
+
+    # ─── Near-Resolved ───────────────────────────────────────────────────────
+    NEAR_RESOLVED_MIN_EDGE: float  = float(os.getenv("NEAR_RESOLVED_MIN_EDGE", "3.0"))
+    NEAR_RESOLVED_MAX_HOURS: float = float(os.getenv("NEAR_RESOLVED_MAX_HOURS","4.0"))
+    NEAR_RESOLVED_AUTO_EXIT: bool  = os.getenv("NEAR_RESOLVED_AUTO_EXIT","true").lower() in ("true","1","yes")
+
+    # ─── Correlated Arbitrage ────────────────────────────────────────────────
+    CORRELATED_MIN_DIVERGENCE: float = float(os.getenv("CORRELATED_MIN_DIVERGENCE","5.0"))
+    CORRELATED_SCAN_EVERY: int       = int(os.getenv("CORRELATED_SCAN_EVERY",      "5"))
+    CORRELATED_MAX_POSITIONS: int    = int(os.getenv("CORRELATED_MAX_POSITIONS",   "3"))
+
+    # ─── Liquidity Snipe ─────────────────────────────────────────────────────
+    SNIPER_ENABLED: bool        = os.getenv("SNIPER_ENABLED","true").lower() in ("true","1","yes")
+    SNIPER_TIER1_PRICE: float   = float(os.getenv("SNIPER_TIER1_PRICE","0.01"))
+    SNIPER_TIER1_PCT: float     = float(os.getenv("SNIPER_TIER1_PCT",  "50"))
+    SNIPER_TIER2_PRICE: float   = float(os.getenv("SNIPER_TIER2_PRICE","0.02"))
+    SNIPER_TIER2_PCT: float     = float(os.getenv("SNIPER_TIER2_PCT",  "30"))
+    SNIPER_TIER3_PRICE: float   = float(os.getenv("SNIPER_TIER3_PRICE","0.03"))
+    SNIPER_TIER3_PCT: float     = float(os.getenv("SNIPER_TIER3_PCT",  "20"))
+    ENDCYCLE_ENABLED: bool      = os.getenv("ENDCYCLE_ENABLED","true").lower() in ("true","1","yes")
+    ENDCYCLE_MIN_MOVEMENT: float= float(os.getenv("ENDCYCLE_MIN_MOVEMENT","0.5"))
+    ENDCYCLE_POSITION_USD: float= float(os.getenv("ENDCYCLE_POSITION_USD","25"))
+    CRASH_REBOUND_ENABLED: bool       = os.getenv("CRASH_REBOUND_ENABLED","true").lower() in ("true","1","yes")
+    CRASH_REBOUND_DROP_THRESHOLD: float= float(os.getenv("CRASH_REBOUND_DROP_THRESHOLD","15"))
+    CRASH_REBOUND_HOLD_HOURS: float   = float(os.getenv("CRASH_REBOUND_HOLD_HOURS","6"))
+
     # === API endpoints ===
-    CLOB_API_URL: str = os.getenv("CLOB_API_URL", "https://clob.polymarket.com")
+    CLOB_API_URL: str  = os.getenv("CLOB_API_URL",  "https://clob.polymarket.com")
     GAMMA_API_URL: str = os.getenv("GAMMA_API_URL", "https://gamma-api.polymarket.com")
-    DATA_API_URL: str = os.getenv("DATA_API_URL", "https://data-api.polymarket.com")
+    DATA_API_URL: str  = os.getenv("DATA_API_URL",  "https://data-api.polymarket.com")
 
     # === Logging ===
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-    LOG_FILE: str = os.getenv("LOG_FILE", "logs/bot.log")
+    LOG_FILE: str  = os.getenv("LOG_FILE",  "logs/bot.log")
 
     # === Polygon chain ===
-    CHAIN_ID: int = 137
-    RPC_URL: str = os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org")
+    CHAIN_ID: int    = 137
+    RPC_URL: str     = os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org")
     RPC_FALLBACKS: list[str] = [
         os.getenv("POLYGON_RPC_URL", "https://polygon.drpc.org"),
         "https://polygon-bor-rpc.publicnode.com",
     ]
 
     # === Token addresses on Polygon ===
-    USDC_NATIVE: str = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+    USDC_NATIVE:  str = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
     USDC_BRIDGED: str = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-    PUSD: str = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+    PUSD: str         = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 
     # === Polymarket V2 contract addresses (Polygon mainnet) ===
-    COLLATERAL_ONRAMP: str = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
-    COLLATERAL_OFFRAMP: str = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854"
-    CTF_EXCHANGE_V2: str = "0xE111180000d2663C0091e4f400237545B87B996B"
-    NEG_RISK_CTF_EXCHANGE_V2: str = "0xe2222d279d744050d28e00520010520000310F59"
-    CTF_CONTRACT: str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
+    COLLATERAL_ONRAMP:       str = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
+    COLLATERAL_OFFRAMP:      str = "0x2957922Eb93258b93368531d39fAcCA3B4dC5854"
+    CTF_EXCHANGE_V2:         str = "0xE111180000d2663C0091e4f400237545B87B996B"
+    NEG_RISK_CTF_EXCHANGE_V2:str = "0xe2222d279d744050d28e00520010520000310F59"
+    CTF_CONTRACT:            str = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045"
 
     @classmethod
     def validate(cls) -> list[str]:
-        """Return list of configuration errors."""
         errors = []
         if not cls.PRIVATE_KEY:
             errors.append(
@@ -114,10 +136,6 @@ class Config:
                 f"DEFAULT_TRADE_SIZE_USD ({cls.DEFAULT_TRADE_SIZE_USD}) "
                 f"exceeds MAX_POSITION_USD ({cls.MAX_POSITION_USD})"
             )
-        if cls.COMPOUND_PCT <= 0 or cls.COMPOUND_PCT > 1.0:
-            errors.append("COMPOUND_PCT must be between 0 and 1.0 (e.g. 0.20 = 20%)")
-        if cls.TRAILING_STOP_PCT < 0:
-            errors.append("TRAILING_STOP_PCT must be >= 0 (set to 0 to disable)")
         return errors
 
     @classmethod
@@ -127,20 +145,19 @@ class Config:
     @classmethod
     def summary(cls) -> dict:
         return {
-            "dry_run": cls.DRY_RUN,
-            "default_trade_size_usd": cls.DEFAULT_TRADE_SIZE_USD,
-            "max_position_usd": cls.MAX_POSITION_USD,
-            "max_total_exposure_usd": cls.MAX_TOTAL_EXPOSURE_USD,
-            "max_daily_loss_usd": cls.MAX_DAILY_LOSS_USD,
-            "min_edge_pct": cls.MIN_EDGE_PCT,
-            "max_open_positions": cls.MAX_OPEN_POSITIONS,
-            "trailing_stop_pct": cls.TRAILING_STOP_PCT,
-            "auto_compound": cls.AUTO_COMPOUND,
-            "compound_pct": cls.COMPOUND_PCT,
-            "scan_interval_sec": cls.SCAN_INTERVAL_SEC,
-            "scan_categories": cls.SCAN_CATEGORIES,
-            "auto_redeem": cls.AUTO_REDEEM,
-            "private_key_set": bool(cls.PRIVATE_KEY),
+            "dry_run":              cls.DRY_RUN,
+            "default_trade_size":   cls.DEFAULT_TRADE_SIZE_USD,
+            "max_position_usd":     cls.MAX_POSITION_USD,
+            "max_exposure":         cls.MAX_TOTAL_EXPOSURE_USD,
+            "max_daily_loss":       cls.MAX_DAILY_LOSS_USD,
+            "min_edge_pct":         cls.MIN_EDGE_PCT,
+            "max_positions":        cls.MAX_OPEN_POSITIONS,
+            "strategies": {
+                "mispricing":    cls.MISPRICING_ENABLED,
+                "near_resolved": cls.NEAR_RESOLVED_ENABLED,
+                "correlated":    cls.CORRELATED_ARB_ENABLED,
+                "sniper":        cls.LIQUIDITY_SNIPE_ENABLED,
+            },
         }
 
 

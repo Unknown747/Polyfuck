@@ -27,6 +27,7 @@ from src.scanner.scanner import (
 from src.trader.trader import Trader
 from src.positions.positions import PositionTracker
 from src.redemption.redemption import AutoRedeemer
+from src.strategies.orchestrator import Orchestrator
 import src.utils.opportunity_logger as opp_logger
 
 console = Console()
@@ -97,6 +98,17 @@ class PolymarketBot:
         # Initialise SQLite trade history and wallet balance cache
         trade_db.init_db()
         self._wallet_balance: float = 0.0
+
+        # Strategy orchestrator (handles all 4 strategies)
+        self.orchestrator = Orchestrator(self.trader, self.gamma, self.clob)
+
+        # Per-strategy cumulative counters (session-level)
+        self._strategy_stats: dict = {
+            "mispricing":    {"opps": 0, "trades": 0, "pnl": 0.0},
+            "near_resolved": {"opps": 0, "trades": 0, "pnl": 0.0},
+            "correlated":    {"opps": 0, "trades": 0, "pnl": 0.0},
+            "sniper":        {"opps": 0, "trades": 0, "pnl": 0.0},
+        }
 
     def start(self) -> None:
         """Start the bot."""
@@ -178,84 +190,49 @@ class PolymarketBot:
             console.print(f"\n[bold cyan]── Scan #{self._scan_count} ──[/]")
 
             try:
-                # 1. Scan for mispricing opportunities
-                opportunities = self.scan_once()
+                # ── Run all 4 strategies via orchestrator ──────────────────
+                orch_result = self.orchestrator.run(categories=config.SCAN_CATEGORIES)
 
-                if opportunities:
-                    self._opportunities_found += len(opportunities)
-                    display_opportunities(opportunities)
+                # Accumulate strategy counters
+                self._opportunities_found += orch_result.mispricing_opps + orch_result.nr_opps
+                self._near_resolved_found += orch_result.nr_opps
+                self._trades_executed     += orch_result.total_trades
 
-                    best         = opportunities[0]
-                    profit_calc  = self.trader.calculate_profit_after_fees(
-                        best, self.trader._current_trade_size
-                    )
-                    # BUG FIX: Mispricing has no _category attr; use categories list instead
-                    category     = best.categories[0] if best.categories else ""
-                    executed     = False
+                ss = self._strategy_stats
+                ss["mispricing"]["opps"]   += orch_result.mispricing_opps
+                ss["mispricing"]["trades"] += orch_result.mispricing_trades
+                ss["mispricing"]["pnl"]    += orch_result.mispricing_pnl
+                ss["near_resolved"]["opps"]   += orch_result.nr_opps
+                ss["near_resolved"]["trades"] += orch_result.nr_trades
+                ss["near_resolved"]["pnl"]    += orch_result.nr_pnl
+                ss["correlated"]["opps"]   += orch_result.corr_opps
+                ss["correlated"]["trades"] += orch_result.corr_trades
+                ss["correlated"]["pnl"]    += orch_result.corr_pnl
+                ss["sniper"]["opps"]   += orch_result.sniper_signals
+                ss["sniper"]["trades"] += orch_result.sniper_orders
+                ss["sniper"]["pnl"]    += orch_result.sniper_pnl
 
-                    console.print(
-                        f"\n[bold]Best opportunity:[/] {best.market_question}\n"
-                        f"  Edge: {best.edge_pct:.2f}% | "
-                        f"Est. profit: ${profit_calc['net_profit']:.4f} "
-                        f"({profit_calc['roi_pct']:.1f}% ROI)"
-                    )
-
-                    if profit_calc["profitable"]:
-                        trade = self.trader.execute_mispricing_trade(
-                            best, self.trader._current_trade_size
-                        )
-                        if trade:
-                            self._trades_executed += 1
-                            executed = True
-                    else:
-                        console.print(
-                            f"[yellow]Skipping — edge {best.edge_pct:.2f}% not "
-                            f"profitable after fees.[/]"
-                        )
-
-                    # Persist to SQLite
-                    if trade:
-                        trade_db.insert_trade(trade, category, "mispricing")
-
-                    # Feature 3: Log opportunity to CSV/JSONL
-                    row = opp_logger.log_mispricing(best, executed, profit_calc, category)
-                    _append_opp_log(row)
-
-                    # Every 5th scan: also check cross-market correlations
-                    if self._scan_count % 5 == 0:
-                        corrs = self.scanner.scan_correlated()
-                        for corr in corrs[:3]:
-                            console.print(
-                                f"  [magenta]Correlation:[/] {corr.description} "
-                                f"({corr.edge_pct:.1f}% edge)"
-                            )
-                else:
-                    console.print("[dim]No opportunities found. Waiting...[/]")
-
-                # 1b. Near-resolved scan — runs every scan (not every 3)
-                # so opportunities are not missed when they close quickly.
-                near_resolved = self.scanner.scan_near_resolved(
-                    categories=config.SCAN_CATEGORIES,
+                # Console summary
+                console.print(
+                    f"[bold]Orchestrator results:[/] "
+                    f"Mispricing={orch_result.mispricing_opps}opps/{orch_result.mispricing_trades}trades "
+                    f"| NearResolved={orch_result.nr_opps}/{orch_result.nr_trades} "
+                    f"| Correlated={orch_result.corr_opps}/{orch_result.corr_trades} "
+                    f"| Sniper={orch_result.sniper_signals}sig/{orch_result.sniper_orders}ord"
                 )
-                if near_resolved:
-                    self._near_resolved_found += len(near_resolved)
-                    display_near_resolved(near_resolved)
-                    # Attempt up to 2 near-resolved trades per scan (safety limits apply)
-                    for best_nr in near_resolved[:2]:
-                        nr_executed = False
-                        nr_trade    = self.trader.execute_near_resolved_trade(
-                            best_nr, investment_usd=self.trader._current_trade_size
-                        )
-                        if nr_trade:
-                            self._trades_executed += 1
-                            nr_executed = True
-                            trade_db.insert_trade(nr_trade, "", "near_resolved")
+                if orch_result.errors:
+                    for err in orch_result.errors:
+                        console.print(f"[red]Strategy error: {err}[/]")
 
-                        # Feature 3: Log near-resolved opportunity
-                        nr_row = opp_logger.log_near_resolved(best_nr, nr_executed)
-                        _append_opp_log(nr_row)
+                # Update dashboard active_pairs + sniper_orders
+                _stats["active_pairs"]       = [
+                    {"type": p.pair_type, "a": p.market_a_question[:40],
+                     "b": p.market_b_question[:40], "div": round(p.divergence_pct, 1)}
+                    for p in orch_result.active_pairs[:5]
+                ]
+                _stats["active_sniper_orders"] = len(orch_result.active_sniper_orders)
 
-                # 2. Feature 2: Check trailing stops every scan
+                # 2. Check trailing stops every scan
                 if self.positions and not self.dry_run:
                     current_positions = self.positions.refresh_positions()
                     if current_positions:
@@ -335,12 +312,13 @@ class PolymarketBot:
         # Serialize trade log for dashboard (safe for JSON)
         trade_log_serialized = [
             {
-                "time":   time.strftime("%H:%M:%S", time.gmtime(t.timestamp)),
-                "market": t.market_question[:50],
-                "side":   t.side,
-                "price":  round(t.price, 4),
-                "size":   round(t.size, 2),
-                "status": t.status,
+                "time":     time.strftime("%H:%M:%S", time.gmtime(t.timestamp)),
+                "market":   t.market_question[:50],
+                "side":     t.side,
+                "price":    round(t.price, 4),
+                "size":     round(t.size, 2),
+                "status":   t.status,
+                "strategy": getattr(t, "strategy", ""),
             }
             for t in daily["trade_log"][-20:]
         ]
@@ -356,13 +334,17 @@ class PolymarketBot:
         if self._scan_count % 10 == 1:
             self._wallet_balance = self._fetch_wallet_balance()
 
+        # Orchestrator health
+        orch_health = self.orchestrator.get_health()
+        orch_pnl    = self.orchestrator.get_pnl()
+
         _stats.update({
             "scans":           self._scan_count,
             "opportunities":   self._opportunities_found,
             "near_resolved":   self._near_resolved_found,
             "trades":          self._trades_executed,
             "open_positions":  daily["open_positions"],
-            "max_positions":   config.MAX_OPEN_POSITIONS,
+            "max_positions":   config.MAX_CONCURRENT_POSITIONS,
             "exposure":        daily["total_exposure_usd"],
             "max_exposure":    config.MAX_TOTAL_EXPOSURE_USD,
             "daily_pnl":       daily["daily_pnl"],
@@ -374,9 +356,12 @@ class PolymarketBot:
             "trade_log":       trade_log_serialized,
             "pnl_history":     hist,
             "opp_stats":       opp_logger.get_stats(),
-            "category_stats":  self.scanner.get_category_stats(),
+            "category_stats":  self.orchestrator.get_category_stats(),
             "wallet_balance":  self._wallet_balance,
             "db_stats":        trade_db.get_db_stats(),
+            "strategy_stats":  self._strategy_stats,
+            "strategy_pnl":    orch_pnl,
+            "strategy_health": orch_health,
         })
 
     def _fetch_wallet_balance(self) -> float:
@@ -441,7 +426,7 @@ _stats: dict = {
     "near_resolved":   0,
     "trades":          0,
     "open_positions":  0,
-    "max_positions":   config.MAX_OPEN_POSITIONS,
+    "max_positions":   config.MAX_CONCURRENT_POSITIONS,
     "exposure":        0.0,
     "max_exposure":    config.MAX_TOTAL_EXPOSURE_USD,
     "daily_pnl":       0.0,
@@ -457,7 +442,22 @@ _stats: dict = {
     "opp_stats":       {"total_logged": 0, "executed": 0, "avg_edge_pct": 0.0},
     "category_stats":  {},
     "wallet_balance":  0.0,
-    "db_stats":        {"total": 0, "executed": 0, "dry_run": 0},
+    "db_stats":        {"total": 0, "executed": 0, "dry_run": 0, "by_strategy": {}},
+    "strategy_stats":  {
+        "mispricing":    {"opps": 0, "trades": 0, "pnl": 0.0},
+        "near_resolved": {"opps": 0, "trades": 0, "pnl": 0.0},
+        "correlated":    {"opps": 0, "trades": 0, "pnl": 0.0},
+        "sniper":        {"opps": 0, "trades": 0, "pnl": 0.0},
+    },
+    "strategy_pnl":    {"mispricing": 0.0, "near_resolved": 0.0, "correlated": 0.0, "sniper": 0.0},
+    "strategy_health": {
+        "mispricing":    {"disabled": False, "failures": 0},
+        "near_resolved": {"disabled": False, "failures": 0},
+        "correlated":    {"disabled": False, "failures": 0},
+        "sniper":        {"disabled": False, "failures": 0},
+    },
+    "active_pairs":          [],
+    "active_sniper_orders":  0,
 }
 
 
@@ -481,120 +481,203 @@ def _append_opp_log(row: dict) -> None:
 # ── Dashboard HTML ──────────────────────────────────────────────────────────
 
 _HTML_TEMPLATE = """<!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ClawBots – Polymarket Bot</title>
+<title>ClawBots – 4-Strategy Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',sans-serif;padding:20px}
+  body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',sans-serif;padding:20px;max-width:1400px;margin:0 auto}
   h1{font-size:1.4rem;color:#58a6ff;margin-bottom:4px}
   .sub{color:#8b949e;font-size:.82rem;margin-bottom:18px;display:flex;gap:14px;align-items:center;flex-wrap:wrap}
   .badge{padding:2px 10px;border-radius:20px;font-size:.78rem;font-weight:600}
   .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#2ecc71;margin-right:4px;animation:pulse 2s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:12px;margin-bottom:18px}
-  .card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:15px}
-  .card .label{color:#8b949e;font-size:.70rem;text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px}
-  .card .value{font-size:1.5rem;font-weight:700}
-  .bar-wrap{background:#21262d;border-radius:4px;height:6px;overflow:hidden;margin-top:7px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:10px;margin-bottom:16px}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px}
+  .card .label{color:#8b949e;font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+  .card .value{font-size:1.45rem;font-weight:700}
+  .card .sub-val{font-size:.72rem;color:#8b949e;margin-top:2px}
+  .bar-wrap{background:#21262d;border-radius:4px;height:5px;overflow:hidden;margin-top:6px}
   .bar{height:100%;border-radius:4px;background:#58a6ff;transition:width .4s}
-  .section{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:15px;margin-bottom:15px}
-  .section h3{font-size:.88rem;color:#8b949e;margin-bottom:11px;font-weight:600}
-  .row2{display:grid;grid-template-columns:1fr 1fr;gap:15px;margin-bottom:15px}
-  table{width:100%;border-collapse:collapse;font-size:.79rem}
+  .section{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:14px;margin-bottom:14px}
+  .section h3{font-size:.86rem;color:#8b949e;margin-bottom:10px;font-weight:600;display:flex;align-items:center;gap:6px}
+  .health-dot{width:7px;height:7px;border-radius:50%;display:inline-block}
+  .ok{background:#2ecc71}.warn{background:#f39c12}.err{background:#e74c3c}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px}
+  .row4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin-bottom:14px}
+  .strat-card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:13px}
+  .strat-card .strat-name{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;font-weight:700;margin-bottom:8px}
+  .strat-card .s-row{display:flex;justify-content:space-between;font-size:.78rem;margin:3px 0}
+  .strat-card .s-row .sk{color:#8b949e}
+  .strat-card .s-row .sv{font-weight:600}
+  table{width:100%;border-collapse:collapse;font-size:.78rem}
   th{color:#8b949e;text-align:left;padding:4px 8px;font-weight:500;border-bottom:1px solid #30363d}
   td{padding:5px 8px;border-bottom:1px solid #21262d}
   tr:last-child td{border-bottom:none}
-  .g{color:#2ecc71}.r{color:#e74c3c}
+  .g{color:#2ecc71}.r{color:#e74c3c}.b{color:#58a6ff}.y{color:#f39c12}
   .footer{color:#8b949e;font-size:.74rem;text-align:center;margin-top:10px}
-  canvas{max-height:190px}
-  @media(max-width:620px){.row2{grid-template-columns:1fr}}
+  canvas{max-height:200px}
+  .bal-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
+  .bal-card{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px;text-align:center}
+  .bal-card .bl{font-size:.65rem;color:#8b949e;text-transform:uppercase;letter-spacing:.06em}
+  .bal-card .bv{font-size:1.1rem;font-weight:700;margin-top:2px}
+  @media(max-width:900px){.row4{grid-template-columns:1fr 1fr}.row2{grid-template-columns:1fr}.bal-grid{grid-template-columns:1fr 1fr}}
+  @media(max-width:540px){.row4{grid-template-columns:1fr}.bal-grid{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
-<h1>&#x1F52B; ClawBots &#x2013; Polymarket Bot</h1>
+<h1>&#x1F52B; ClawBots &mdash; 4-Strategy Polymarket Bot</h1>
 <div class="sub">
-  <span>Mulai: <span id="started">&#x2013;</span></span>
-  <span>Scan terakhir: <span id="lastScan">&#x2013;</span></span>
+  <span>Started: <span id="started">&ndash;</span></span>
+  <span>Last scan: <span id="lastScan">&ndash;</span></span>
   <span id="modeBadge" class="badge" style="background:#f39c1222;color:#f39c12">DRY RUN</span>
-  <span><span class="dot"></span><span id="tradeSize">&#x2013;</span> per trade</span>
+  <span><span class="dot"></span><span id="tradeSize">&ndash;</span>/trade</span>
 </div>
 
+<!-- Balance display -->
+<div class="bal-grid">
+  <div class="bal-card"><div class="bl">Wallet USDC</div><div class="bv g" id="b-wallet">N/A</div></div>
+  <div class="bal-card"><div class="bl">Exposure</div><div class="bv y" id="b-exp-val">$0</div></div>
+  <div class="bal-card"><div class="bl">Available</div><div class="bv" id="b-avail">–</div></div>
+  <div class="bal-card"><div class="bl">Redeemed</div><div class="bv g" id="b-red">$0</div></div>
+</div>
+
+<!-- Global summary cards -->
 <div class="grid">
-  <div class="card"><div class="label">Total Scan</div><div class="value" id="v-scans">&#x2013;</div></div>
-  <div class="card"><div class="label">Mispricing</div><div class="value" id="v-opp">&#x2013;</div></div>
-  <div class="card"><div class="label">Near-Resolved</div><div class="value" id="v-nr" style="color:#58a6ff">&#x2013;</div></div>
-  <div class="card"><div class="label">Trades</div><div class="value" id="v-trades">&#x2013;</div></div>
-  <div class="card"><div class="label">Daily P&amp;L</div><div class="value" id="v-pnl">&#x2013;</div></div>
-  <div class="card"><div class="label">Redeemed</div><div class="value" id="v-red">&#x2013;</div></div>
+  <div class="card"><div class="label">Scans</div><div class="value" id="v-scans">&ndash;</div></div>
+  <div class="card"><div class="label">Total Opps</div><div class="value" id="v-opp">&ndash;</div></div>
+  <div class="card"><div class="label">Total Trades</div><div class="value" id="v-trades">&ndash;</div></div>
+  <div class="card"><div class="label">Daily P&amp;L</div><div class="value" id="v-pnl">&ndash;</div></div>
   <div class="card">
-    <div class="label">Posisi</div><div class="value" id="v-pos">&#x2013;</div>
+    <div class="label">Positions</div><div class="value" id="v-pos">&ndash;</div>
     <div class="bar-wrap"><div class="bar" id="b-pos" style="width:0%"></div></div>
   </div>
   <div class="card">
-    <div class="label">Eksposur</div><div class="value" id="v-exp">&#x2013;</div>
+    <div class="label">Exposure</div><div class="value" id="v-exp">&ndash;</div>
     <div class="bar-wrap"><div class="bar" id="b-exp" style="width:0%"></div></div>
   </div>
   <div class="card"><div class="label">Stop-Loss Hit</div><div class="value r" id="v-stops">0</div></div>
-  <div class="card"><div class="label">Opp Dicatat</div><div class="value" id="v-opp-log">0</div></div>
-  <div class="card">
-    <div class="label">Wallet Balance</div>
-    <div class="value g" id="v-wallet">–</div>
+  <div class="card"><div class="label">DB Trades</div><div class="value" id="v-db-total">&ndash;</div></div>
+</div>
+
+<!-- 4 Strategy panels -->
+<div class="row4">
+  <div class="strat-card" id="sc-mispricing">
+    <div class="strat-name b">&#x26A1; Mispricing</div>
+    <div class="s-row"><span class="sk">Opps</span><span class="sv" id="sm-opps">0</span></div>
+    <div class="s-row"><span class="sk">Trades</span><span class="sv" id="sm-trades">0</span></div>
+    <div class="s-row"><span class="sk">P&amp;L</span><span class="sv" id="sm-pnl">$0.00</span></div>
+    <div class="s-row"><span class="sk">Health</span><span class="sv"><span class="health-dot ok" id="hd-m"></span></span></div>
   </div>
-  <div class="card">
-    <div class="label">Trade DB Total</div>
-    <div class="value" id="v-db-total">–</div>
+  <div class="strat-card" id="sc-nr">
+    <div class="strat-name" style="color:#2ecc71">&#x1F4C5; Near-Resolved</div>
+    <div class="s-row"><span class="sk">Opps</span><span class="sv" id="snr-opps">0</span></div>
+    <div class="s-row"><span class="sk">Trades</span><span class="sv" id="snr-trades">0</span></div>
+    <div class="s-row"><span class="sk">P&amp;L</span><span class="sv" id="snr-pnl">$0.00</span></div>
+    <div class="s-row"><span class="sk">Health</span><span class="sv"><span class="health-dot ok" id="hd-nr"></span></span></div>
+  </div>
+  <div class="strat-card" id="sc-corr">
+    <div class="strat-name" style="color:#9b59b6">&#x1F517; Correlated Arb</div>
+    <div class="s-row"><span class="sk">Pairs</span><span class="sv" id="sc-opps">0</span></div>
+    <div class="s-row"><span class="sk">Trades</span><span class="sv" id="sc-trades">0</span></div>
+    <div class="s-row"><span class="sk">P&amp;L</span><span class="sv" id="sc-pnl">$0.00</span></div>
+    <div class="s-row"><span class="sk">Health</span><span class="sv"><span class="health-dot ok" id="hd-c"></span></span></div>
+  </div>
+  <div class="strat-card" id="sc-sniper">
+    <div class="strat-name" style="color:#e74c3c">&#x1F3AF; Liquidity Sniper</div>
+    <div class="s-row"><span class="sk">Signals</span><span class="sv" id="ss-opps">0</span></div>
+    <div class="s-row"><span class="sk">Orders</span><span class="sv" id="ss-trades">0</span></div>
+    <div class="s-row"><span class="sk">P&amp;L</span><span class="sv" id="ss-pnl">$0.00</span></div>
+    <div class="s-row"><span class="sk">Health</span><span class="sv"><span class="health-dot ok" id="hd-s"></span></span></div>
   </div>
 </div>
 
+<!-- Stacked P&L chart by strategy -->
 <div class="section">
-  <h3>&#x1F4C8; Daily P&amp;L History</h3>
+  <h3>&#x1F4C8; Cumulative P&amp;L by Strategy (session)</h3>
+  <canvas id="stratChart"></canvas>
+</div>
+
+<!-- Global P&L history chart -->
+<div class="section">
+  <h3>&#x1F4C9; Daily P&amp;L History</h3>
   <canvas id="pnlChart"></canvas>
 </div>
 
+<!-- Trade log + opportunities row -->
 <div class="row2">
   <div class="section">
-    <h3>&#x1F504; Trade Terbaru</h3>
+    <h3>&#x1F504; Recent Trades (with strategy)</h3>
     <table>
-      <thead><tr><th>Waktu</th><th>Market</th><th>Side</th><th>Harga</th><th>Status</th></tr></thead>
-      <tbody id="tradeBody"><tr><td colspan="5" style="color:#8b949e;text-align:center">Belum ada trade</td></tr></tbody>
+      <thead><tr><th>Time</th><th>Market</th><th>Strategy</th><th>Side</th><th>Price</th><th>Status</th></tr></thead>
+      <tbody id="tradeBody"><tr><td colspan="6" style="color:#8b949e;text-align:center">No trades yet</td></tr></tbody>
     </table>
   </div>
   <div class="section">
-    <h3>&#x1F3AF; Peluang Terbaru</h3>
+    <h3>&#x1F3AF; Active Correlated Pairs</h3>
     <table>
-      <thead><tr><th>Waktu</th><th>Market</th><th>Edge</th><th>Eksekusi</th></tr></thead>
-      <tbody id="oppBody"><tr><td colspan="4" style="color:#8b949e;text-align:center">Belum ada peluang</td></tr></tbody>
+      <thead><tr><th>Type</th><th>Market A</th><th>Market B</th><th>Div%</th></tr></thead>
+      <tbody id="pairBody"><tr><td colspan="4" style="color:#8b949e;text-align:center">No pairs detected</td></tr></tbody>
     </table>
   </div>
 </div>
 
+<!-- Category stats -->
 <div class="section">
-  <h3>&#x1F4C2; Stats per Kategori</h3>
+  <h3>&#x1F4C2; Category Stats</h3>
   <table>
-    <thead><tr><th>Kategori</th><th>Peluang</th><th>Fee Taker</th><th>Min Edge Efektif</th></tr></thead>
-    <tbody id="catBody"><tr><td colspan="4" style="color:#8b949e;text-align:center">Belum ada data</td></tr></tbody>
+    <thead><tr><th>Category</th><th>Opps</th><th>Taker Fee</th><th>Min Edge</th></tr></thead>
+    <tbody id="catBody"><tr><td colspan="4" style="color:#8b949e;text-align:center">No data yet</td></tr></tbody>
   </table>
 </div>
 
+<!-- Error panel (hidden when empty) -->
 <div class="section" id="errSection" style="display:none">
-  <h3>&#x26A0;&#xFE0F; Error Terbaru</h3>
+  <h3>&#x26A0;&#xFE0F; Recent Errors</h3>
   <table>
-    <thead><tr><th>Waktu</th><th>Level</th><th>Pesan</th></tr></thead>
+    <thead><tr><th>Time</th><th>Level</th><th>Message</th></tr></thead>
     <tbody id="errBody"></tbody>
   </table>
 </div>
 
-<div class="footer" id="footer">Auto-refresh tiap 5 detik</div>
+<div class="footer" id="footer">Auto-refresh every 5s</div>
 
 <script>
 const FEES={crypto:.07,sports:.03,finance:.04,politics:.04,economics:.05,culture:.05,geopolitics:0};
 const FEE_MULT=1.5;
-const ctx=document.getElementById('pnlChart').getContext('2d');
-const pnlChart=new Chart(ctx,{
+const STRAT_COLORS={
+  mispricing:   {border:'#58a6ff', bg:'rgba(88,166,255,0.15)'},
+  near_resolved:{border:'#2ecc71', bg:'rgba(46,204,113,0.15)'},
+  correlated:   {border:'#9b59b6', bg:'rgba(155,89,182,0.15)'},
+  sniper:       {border:'#e74c3c', bg:'rgba(231,76,60,0.15)'},
+};
+
+// Stacked strategy P&L bar chart
+const sCtx=document.getElementById('stratChart').getContext('2d');
+const stratChart=new Chart(sCtx,{
+  type:'bar',
+  data:{
+    labels:['Mispricing','Near-Resolved','Correlated','Sniper'],
+    datasets:[{
+      label:'Session P&L ($)',
+      data:[0,0,0,0],
+      backgroundColor:['rgba(88,166,255,0.7)','rgba(46,204,113,0.7)','rgba(155,89,182,0.7)','rgba(231,76,60,0.7)'],
+      borderColor:['#58a6ff','#2ecc71','#9b59b6','#e74c3c'],
+      borderWidth:1,borderRadius:5,
+    }]
+  },
+  options:{responsive:true,animation:false,
+    plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>'$'+c.raw.toFixed(4)}}},
+    scales:{y:{ticks:{color:'#8b949e',callback:v=>'$'+v.toFixed(2)},grid:{color:'#21262d'}},
+            x:{ticks:{color:'#8b949e'},grid:{display:false}}}}
+});
+
+// Daily P&L line chart
+const pCtx=document.getElementById('pnlChart').getContext('2d');
+const pnlChart=new Chart(pCtx,{
   type:'line',
   data:{labels:[],datasets:[{label:'Daily P&L ($)',data:[],borderColor:'#58a6ff',
     backgroundColor:'rgba(88,166,255,0.08)',fill:true,tension:0.35,
@@ -605,9 +688,15 @@ const pnlChart=new Chart(ctx,{
             x:{ticks:{color:'#8b949e',maxTicksLimit:10},grid:{display:false}}}}
 });
 
+function pnlColor(v){return v>=0?'#2ecc71':'#e74c3c';}
+function fmt(v,pre='$'){const n=parseFloat(v||0);return pre+(n>=0?'':'')+n.toFixed(2);}
+function healthCls(h){return h&&h.disabled?'err':(h&&h.failures>0?'warn':'ok');}
+
 async function fetchStats(){
   try{
     const s=await fetch('/api/stats').then(r=>r.json());
+
+    // Header
     document.getElementById('started').textContent=s.started||'–';
     document.getElementById('lastScan').textContent=s.last_scan||'–';
     document.getElementById('tradeSize').textContent='$'+parseFloat(s.trade_size_usd||0).toFixed(2);
@@ -616,84 +705,119 @@ async function fetchStats(){
     mb.style.background=s.mode==='LIVE'?'#e74c3c22':'#f39c1222';
     mb.style.color=s.mode==='LIVE'?'#e74c3c':'#f39c12';
 
+    // Balance row
+    const bal=parseFloat(s.wallet_balance||0);
+    const exp=parseFloat(s.exposure||0);
+    const avail=s.mode==='LIVE'?Math.max(0,bal-exp):null;
+    document.getElementById('b-wallet').textContent=s.mode==='DRY RUN'?'N/A':'$'+bal.toFixed(2);
+    document.getElementById('b-exp-val').textContent='$'+exp.toFixed(2);
+    document.getElementById('b-avail').textContent=avail!==null?'$'+avail.toFixed(2):'N/A';
+    document.getElementById('b-red').textContent='$'+parseFloat(s.redeemed||0).toFixed(2);
+
+    // Global summary
     document.getElementById('v-scans').textContent=s.scans??'–';
     document.getElementById('v-opp').textContent=s.opportunities??'–';
-    document.getElementById('v-nr').textContent=s.near_resolved??'–';
     document.getElementById('v-trades').textContent=s.trades??'–';
     document.getElementById('v-stops').textContent=s.stops_triggered??'0';
-    document.getElementById('v-opp-log').textContent=(s.opp_stats&&s.opp_stats.total_logged)||'0';
-
-    const bal=parseFloat(s.wallet_balance||0);
-    const walletEl=document.getElementById('v-wallet');
-    walletEl.textContent=s.mode==='DRY RUN'?'N/A':'$'+bal.toFixed(2);
-
     const dbs=s.db_stats||{};
-    document.getElementById('v-db-total').textContent=(dbs.total||0)+' trades';
+    document.getElementById('v-db-total').textContent=(dbs.total||0);
 
     const pnl=parseFloat(s.daily_pnl||0);
     const pe=document.getElementById('v-pnl');
     pe.textContent=(pnl>=0?'+':'')+'$'+pnl.toFixed(2);
-    pe.style.color=pnl>=0?'#2ecc71':'#e74c3c';
+    pe.style.color=pnlColor(pnl);
 
-    document.getElementById('v-red').textContent='$'+parseFloat(s.redeemed||0).toFixed(2);
     const posMax=s.max_positions||1,expMax=s.max_exposure||1;
     document.getElementById('v-pos').textContent=(s.open_positions||0)+' / '+posMax;
     document.getElementById('b-pos').style.width=Math.min(100,(s.open_positions/posMax)*100)+'%';
-    document.getElementById('v-exp').textContent='$'+parseFloat(s.exposure||0).toFixed(2);
-    document.getElementById('b-exp').style.width=Math.min(100,(s.exposure/expMax)*100)+'%';
+    document.getElementById('v-exp').textContent='$'+exp.toFixed(2);
+    document.getElementById('b-exp').style.width=Math.min(100,(exp/expMax)*100)+'%';
 
+    // Strategy panels
+    const ss=s.strategy_stats||{};
+    const sp=s.strategy_pnl||{};
+    const sh=s.strategy_health||{};
+
+    const STRATS=[
+      ['mispricing','sm','hd-m'],['near_resolved','snr','hd-nr'],
+      ['correlated','sc','hd-c'],['sniper','ss','hd-s']
+    ];
+    STRATS.forEach(([key,pre,hdId])=>{
+      const d=ss[key]||{};const p=sp[key]||0;const h=sh[key]||{};
+      document.getElementById(pre+'-opps').textContent=d.opps||0;
+      document.getElementById(pre+'-trades').textContent=d.trades||0;
+      const pEl=document.getElementById(pre+'-pnl');
+      pEl.textContent=(p>=0?'+':'')+'$'+parseFloat(p).toFixed(2);
+      pEl.style.color=pnlColor(p);
+      const hDot=document.getElementById(hdId);
+      hDot.className='health-dot '+healthCls(h);
+    });
+
+    // Strategy P&L bar chart
+    stratChart.data.datasets[0].data=[
+      sp.mispricing||0, sp.near_resolved||0, sp.correlated||0, sp.sniper||0
+    ];
+    stratChart.update('none');
+
+    // Daily P&L line chart
     const hist=s.pnl_history||[];
     pnlChart.data.labels=hist.map(h=>h.t);
     pnlChart.data.datasets[0].data=hist.map(h=>h.pnl);
-    const ds=pnlChart.data.datasets[0];
     const lp=hist.length?hist[hist.length-1].pnl:0;
-    ds.borderColor=lp>=0?'#2ecc71':'#e74c3c';
-    ds.backgroundColor=lp>=0?'rgba(46,204,113,0.08)':'rgba(231,76,60,0.08)';
+    pnlChart.data.datasets[0].borderColor=pnlColor(lp);
+    pnlChart.data.datasets[0].backgroundColor=lp>=0?'rgba(46,204,113,0.08)':'rgba(231,76,60,0.08)';
     pnlChart.update('none');
 
+    // Trade log with strategy attribution
     const trades=s.trade_log||[];
     const tbody=document.getElementById('tradeBody');
     tbody.innerHTML=trades.length===0
-      ?'<tr><td colspan="5" style="color:#8b949e;text-align:center">Belum ada trade</td></tr>'
-      :trades.slice(0,10).map(t=>`<tr>
-        <td style="color:#8b949e">${t.time||'–'}</td>
-        <td title="${t.market||''}">${(t.market||'').slice(0,32)}&hellip;</td>
-        <td class="${t.side==='BUY'?'g':'r'}">${t.side||'–'}</td>
-        <td>$${parseFloat(t.price||0).toFixed(3)}</td>
-        <td style="color:#8b949e">${t.status||'–'}</td>
-      </tr>`).join('');
+      ?'<tr><td colspan="6" style="color:#8b949e;text-align:center">No trades yet</td></tr>'
+      :trades.slice(0,10).map(t=>{
+        const stratCol={mispricing:'#58a6ff',near_resolved:'#2ecc71',correlated:'#9b59b6',sniper:'#e74c3c'};
+        const sc=stratCol[t.strategy]||'#8b949e';
+        return `<tr>
+          <td style="color:#8b949e;white-space:nowrap">${t.time||'–'}</td>
+          <td title="${t.market||''}">${(t.market||'').slice(0,28)}&hellip;</td>
+          <td style="color:${sc};font-size:.72rem;font-weight:600">${(t.strategy||'?').replace('_',' ')}</td>
+          <td class="${t.side==='BUY'?'g':'r'}">${t.side||'–'}</td>
+          <td>$${parseFloat(t.price||0).toFixed(3)}</td>
+          <td style="color:#8b949e">${t.status||'–'}</td>
+        </tr>`;}).join('');
 
-    const opps=s.opp_log||[];
-    const obody=document.getElementById('oppBody');
-    obody.innerHTML=opps.length===0
-      ?'<tr><td colspan="4" style="color:#8b949e;text-align:center">Belum ada peluang</td></tr>'
-      :opps.slice(0,10).map(o=>`<tr>
-        <td style="color:#8b949e">${o.time||'–'}</td>
-        <td title="${o.market||''}">${(o.market||'').slice(0,32)}&hellip;</td>
-        <td class="g">${parseFloat(o.edge_pct||0).toFixed(2)}%</td>
-        <td>${o.executed?'&#x2705;':'&#x2013;'}</td>
-      </tr>`).join('');
+    // Active correlated pairs
+    const pairs=s.active_pairs||[];
+    const pbody=document.getElementById('pairBody');
+    pbody.innerHTML=pairs.length===0
+      ?'<tr><td colspan="4" style="color:#8b949e;text-align:center">No active pairs</td></tr>'
+      :pairs.map(p=>`<tr>
+          <td style="color:#9b59b6;font-size:.72rem">${p.type||'–'}</td>
+          <td style="font-size:.74rem">${(p.a||'').slice(0,28)}</td>
+          <td style="font-size:.74rem">${(p.b||'').slice(0,28)}</td>
+          <td class="y">${(p.div||0).toFixed(1)}%</td>
+        </tr>`).join('');
 
+    // Category stats
     const cats=s.category_stats||{};
     const cbody=document.getElementById('catBody');
     const entries=Object.entries(cats).sort((a,b)=>b[1]-a[1]);
     cbody.innerHTML=entries.length===0
-      ?'<tr><td colspan="4" style="color:#8b949e;text-align:center">Belum ada data</td></tr>'
+      ?'<tr><td colspan="4" style="color:#8b949e;text-align:center">No data yet</td></tr>'
       :entries.map(([cat,cnt])=>{
-        const fee=(FEES[cat]||0);
+        const fee=FEES[cat]||0;
         const minEdge=Math.max(1.5,fee*50*FEE_MULT).toFixed(1);
-        return `<tr>
-          <td>${cat}</td><td>${cnt}</td>
+        return `<tr><td>${cat}</td><td>${cnt}</td>
           <td style="color:#8b949e">${(fee*100).toFixed(0)}%</td>
-          <td style="color:#f39c12">${minEdge}%</td>
-        </tr>`;}).join('');
+          <td style="color:#f39c12">${minEdge}%</td></tr>`;
+      }).join('');
 
     document.getElementById('footer').textContent=
-      'Auto-refresh tiap 5 detik \xb7 Update: '+new Date().toLocaleTimeString();
+      'Auto-refresh every 5s \xb7 Updated: '+new Date().toLocaleTimeString();
   }catch(e){
-    document.getElementById('footer').textContent='Gagal memuat data \u2014 mencoba lagi...';
+    document.getElementById('footer').textContent='Failed to load data — retrying...';
   }
 }
+
 async function fetchErrors(){
   try{
     const errs=await fetch('/api/errors').then(r=>r.json());
@@ -701,12 +825,13 @@ async function fetchErrors(){
     if(!errs||errs.length===0){sec.style.display='none';return;}
     sec.style.display='';
     document.getElementById('errBody').innerHTML=errs.slice(0,10).map(e=>`<tr>
-      <td style="color:#8b949e">${e.time||'–'}</td>
+      <td style="color:#8b949e;white-space:nowrap">${e.time||'–'}</td>
       <td class="r">${e.level||'ERROR'}</td>
-      <td style="word-break:break-word">${e.msg||''}</td>
+      <td style="word-break:break-word;font-size:.75rem">${e.msg||''}</td>
     </tr>`).join('');
   }catch(e){}
 }
+
 setInterval(fetchStats,5000);
 setInterval(fetchErrors,10000);
 fetchStats();
