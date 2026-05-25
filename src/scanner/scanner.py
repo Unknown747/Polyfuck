@@ -181,6 +181,10 @@ class MarketScanner:
                 cat_min_edge = self._get_category_min_edge(category, min_edge_pct)
                 opp = self._check_single_market(market, cat_min_edge, min_volume)
                 if opp:
+                    # BUG FIX: populate Mispricing.categories so bot.py and opp_logger
+                    # can read it — _check_single_market has no access to _category.
+                    if category:
+                        opp.categories = [category]
                     opportunities.append(opp)
                     self._category_stats[category] = (
                         self._category_stats.get(category, 0) + 1

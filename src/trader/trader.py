@@ -428,20 +428,34 @@ class Trader:
 
         closed: list[Trade] = []
         for pos in positions:
-            cond_id = pos.get("conditionId", "")
-            if cond_id not in self._position_entry:
+            # BUG FIX: positions are Position dataclass objects, not dicts.
+            # Use attribute access instead of .get() to avoid AttributeError.
+            try:
+                cond_id = getattr(pos, "condition_id", None) or pos.get("conditionId", "")
+            except AttributeError:
+                cond_id = pos.get("conditionId", "")
+
+            if not cond_id or cond_id not in self._position_entry:
                 continue
 
             entry_price, invested = self._position_entry[cond_id]
             if entry_price <= 0:
                 continue
 
-            # current_value is total USDC value of position; derive per-share price
+            # Derive per-share current price from position data
             try:
-                current_value = float(pos.get("currentValue") or pos.get("value") or 0)
-                size_shares   = float(pos.get("size") or 1)
-                current_price = current_value / size_shares if size_shares > 0 else 0.0
-            except (TypeError, ValueError, ZeroDivisionError):
+                # Support both Position dataclass attributes and plain dicts
+                if hasattr(pos, "current_price") and getattr(pos, "current_price", 0):
+                    current_price = float(pos.current_price)
+                elif hasattr(pos, "current_value") and hasattr(pos, "size"):
+                    cv = float(pos.current_value or 0)
+                    sz = float(pos.size or 1)
+                    current_price = cv / sz if sz > 0 else 0.0
+                else:
+                    cv = float(pos.get("currentValue") or pos.get("value") or 0)
+                    sz = float(pos.get("size") or 1)
+                    current_price = cv / sz if sz > 0 else 0.0
+            except (TypeError, ValueError, ZeroDivisionError, AttributeError):
                 continue
 
             if current_price <= 0:
@@ -455,7 +469,14 @@ class Trader:
                     f"Condition {cond_id[:10]}… dropped "
                     f"{drop_pct:.1f}% from entry ${entry_price:.2f} → ${current_price:.2f}"
                 )
-                token_id = pos.get("tokenId") or pos.get("token_id", "")
+                try:
+                    token_id = (getattr(pos, "token_id", None)
+                                or pos.get("tokenId", "") or pos.get("token_id", ""))
+                    size_shares = float(getattr(pos, "size", None) or pos.get("size", 0) or 0)
+                except (AttributeError, TypeError, ValueError):
+                    token_id = ""
+                    size_shares = 0.0
+
                 trade = self.close_position(
                     token_id=token_id,
                     size=size_shares,

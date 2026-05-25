@@ -605,7 +605,7 @@ async function fetchStats(){
       ?'<tr><td colspan="4" style="color:#8b949e;text-align:center">Belum ada data</td></tr>'
       :entries.map(([cat,cnt])=>{
         const fee=(FEES[cat]||0);
-        const minEdge=Math.max(1.5,fee*200*FEE_MULT).toFixed(1);
+        const minEdge=Math.max(1.5,fee*100*FEE_MULT).toFixed(1);
         return `<tr>
           <td>${cat}</td><td>${cnt}</td>
           <td style="color:#8b949e">${(fee*100).toFixed(0)}%</td>
