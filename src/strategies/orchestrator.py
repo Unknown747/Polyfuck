@@ -113,7 +113,9 @@ class Orchestrator:
         self.mispricing = MispricingScanner(self.gamma, self.clob)
         self.nr_scanner  = NearResolvedScanner(self.gamma)
         self.corr_scanner= CorrelatedArbitrageScanner(self.gamma, self.clob)
-        self.sniper      = LiquiditySniper(self.gamma, self.clob)
+        self.sniper      = LiquiditySniper(
+            self.gamma, self.clob, trader=trader, can_place=self._can_trade
+        )
 
         self._health = {
             "mispricing":    HealthMonitor("Mispricing"),
@@ -151,7 +153,8 @@ class Orchestrator:
         results: dict[str, object] = {}
         errors:  dict[str, str]    = {}
 
-        # Run strategies in parallel threads (I/O-bound API calls)
+        # Phase 1: run all strategy SCANS in parallel (pure API calls, no order placement).
+        # Sniper uses scan_markets() here — no orders are posted yet.
         threads = []
 
         if config.MISPRICING_ENABLED and self._health["mispricing"].is_ok:
@@ -176,8 +179,9 @@ class Orchestrator:
             threads.append(t)
 
         if config.LIQUIDITY_SNIPE_ENABLED and self._health["sniper"].is_ok:
+            # Scan only — placement happens AFTER other _apply_* update cooldowns (Phase 2)
             t = threading.Thread(
-                target=self._run_sniper, args=(cats, results, errors), daemon=True
+                target=self._scan_sniper, args=(cats, results, errors), daemon=True
             )
             threads.append(t)
 
@@ -186,10 +190,17 @@ class Orchestrator:
         for t in threads:
             t.join(timeout=60)  # Max 60s per strategy batch
 
-        # Apply results in priority order
+        # Phase 2: apply results in priority order — this updates _active_condition_ids cooldowns.
+        # Mispricing, NearResolved, Correlated run first so their cooldowns are written
+        # before the sniper place phase checks _can_trade().
         self._apply_mispricing(results, errors, result)
         self._apply_near_resolved(results, errors, result)
         self._apply_correlated(results, errors, result)
+
+        # FIX #7 FINAL: place sniper orders AFTER other strategies have updated cooldowns.
+        # _place_sniper() calls sniper.place_orders() which triggers OrderbookSniper.place()
+        # which checks self._can_place (= self._can_trade) with fully updated cooldown state.
+        self._place_sniper(results, errors)
         self._apply_sniper(results, errors, result)
 
         result.total_trades = result.mispricing_trades + result.nr_trades + result.corr_trades
@@ -263,6 +274,7 @@ class Orchestrator:
     def _run_sniper(
         self, cats: list[str], results: dict, errors: dict
     ) -> None:
+        """Legacy single-phase run (kept for reference; no longer called by run())."""
         try:
             sniper_res = self.sniper.run(categories=cats)
             results["sniper"] = sniper_res
@@ -271,6 +283,35 @@ class Orchestrator:
             errors["sniper"] = str(e)
             self._health["sniper"].record_failure(str(e))
             results["sniper"] = {}
+
+    def _scan_sniper(
+        self, cats: list[str], results: dict, errors: dict
+    ) -> None:
+        """Phase 1: scan-only (no order placement). Safe to run in parallel."""
+        try:
+            sniper_scan = self.sniper.scan_markets(categories=cats)
+            results["sniper"] = sniper_scan
+            self._health["sniper"].record_success()
+        except Exception as e:
+            errors["sniper"] = str(e)
+            self._health["sniper"].record_failure(str(e))
+            results["sniper"] = {}
+
+    def _place_sniper(self, results: dict, errors: dict) -> None:
+        """Phase 2: place orders AFTER other strategies have updated cooldowns.
+
+        Called sequentially after _apply_mispricing/_apply_near_resolved/
+        _apply_correlated so _active_condition_ids is fully up-to-date and
+        OrderbookSniper._can_place gives accurate same-cycle cross-strategy dedup.
+        """
+        sniper_scan = results.get("sniper")
+        if not sniper_scan:
+            return
+        try:
+            self.sniper.place_orders(sniper_scan)
+            # sniper_scan dict is mutated in-place by place_orders(); results["sniper"] updated.
+        except Exception as e:
+            logger.warning("Orchestrator: sniper place phase error: %s", e)
 
     # ── Apply results ─────────────────────────────────────────────────────────
 
@@ -367,7 +408,9 @@ class Orchestrator:
 
         out.corr_opps = len(pairs)
 
-        # Respect CORRELATED_MAX_POSITIONS (only count non-expired entries)
+        # Respect CORRELATED_MAX_POSITIONS (only count non-expired entries).
+        # FIX #4: dedupe key is "corr_<buy_market_id>" — _can_trade must use
+        # the same key so the guard actually fires.
         _now = time.time()
         corr_active = sum(
             1 for cid, exp in self._active_condition_ids.items()
@@ -379,12 +422,15 @@ class Orchestrator:
                 break
             if not self._within_global_limits():
                 break
-            if not self._can_trade(pair.buy_market_id):
+
+            # FIX #4: use the same prefixed key that we store below
+            corr_key = f"corr_{pair.buy_market_id}"
+            if not self._can_trade(corr_key):
                 continue
 
             inv = config.DEFAULT_TRADE_SIZE_USD
+            _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
 
-            # Build a minimal trade-like object for DB logging
             if config.DRY_RUN:
                 logger.info(
                     "CorrelatedArb DRY: buy %s @ $%.3f | sell %s @ $%.3f | div=%.1f%%",
@@ -394,8 +440,7 @@ class Orchestrator:
                 )
                 out.corr_trades += 1
                 corr_active += 1
-                _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
-                self._active_condition_ids[f"corr_{pair.buy_market_id}"] = time.time() + _cooldown
+                self._active_condition_ids[corr_key] = time.time() + _cooldown
                 pnl_delta = inv * (pair.divergence_pct / 100) * 0.5
                 self._pnl["correlated"] += pnl_delta
                 out.corr_pnl += pnl_delta
@@ -405,6 +450,72 @@ class Orchestrator:
                     )
                 except Exception:
                     pass
+            else:
+                # FIX #2: live correlated execution path
+                # Strategy: BUY the underpriced leg (market_a), SELL the overpriced leg (market_b).
+                # Both orders are GTC maker orders (0% fee).
+                try:
+                    buy_trade = self.trader._place_order(
+                        token_id=pair.buy_token_id,
+                        side="BUY",
+                        size=inv,
+                        price=pair.buy_price,
+                        condition_id=pair.buy_market_id,
+                        order_type="GTC",
+                    )
+                    if not buy_trade:
+                        logger.warning("CorrelatedArb: BUY leg failed for %s", pair.buy_market_id[:12])
+                        continue
+
+                    sell_trade = self.trader._place_order(
+                        token_id=pair.sell_token_id,
+                        side="SELL",
+                        size=inv,
+                        price=pair.sell_price,
+                        condition_id=pair.sell_market_id,
+                        order_type="GTC",
+                    )
+                    if not sell_trade:
+                        # Cancel the BUY leg to avoid unhedged directional exposure
+                        if buy_trade.order_id:
+                            try:
+                                self.clob.cancel_order(buy_trade.order_id)
+                                logger.warning(
+                                    "CorrelatedArb: SELL leg failed — cancelled BUY %s",
+                                    buy_trade.order_id,
+                                )
+                            except Exception as ce:
+                                logger.error(
+                                    "CorrelatedArb: SELL leg failed AND cancel failed: %s", ce
+                                )
+                        continue
+
+                    logger.info(
+                        "CorrelatedArb LIVE: buy %s @ $%.3f | sell %s @ $%.3f | div=%.1f%%",
+                        pair.market_a_question[:30], pair.buy_price,
+                        pair.market_b_question[:30], pair.sell_price,
+                        pair.divergence_pct,
+                    )
+                    out.corr_trades += 1
+                    corr_active += 1
+                    self._active_condition_ids[corr_key] = time.time() + _cooldown
+                    # Debit capital at entry; credit back on redemption.
+                    # Mutate ALL counters first, then persist atomically.
+                    self.trader._daily_pnl -= inv
+                    self.trader._open_position_count += 1
+                    self.trader._total_exposure_usd += inv
+                    self.trader._persist_daily_pnl()
+                    pnl_delta = inv * (pair.divergence_pct / 100) * 0.5
+                    self._pnl["correlated"] += pnl_delta
+                    out.corr_pnl += pnl_delta
+                    try:
+                        self.db.insert_opportunity(
+                            "correlated", pair.description[:100], pair.divergence_pct, True
+                        )
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    logger.warning("CorrelatedArb: execution error: %s", exc)
 
     def _apply_sniper(
         self, results: dict, errors: dict, out: StrategyResult
@@ -418,6 +529,18 @@ class Orchestrator:
 
         out.sniper_orders  = len(orders)
         out.sniper_signals = len(signals)
+
+        # FIX #7: apply cross-strategy dedup and cooldown to orderbook orders so that
+        # a market already traded by mispricing/near_resolved/correlated is not also
+        # entered by the sniper in the same cooldown window.
+        for order in orders:
+            cid = getattr(order, "condition_id", "") or ""
+            if cid and order.status not in ("cancelled", "cancelled_expired"):
+                if not self._can_trade(cid):
+                    logger.debug("Sniper orderbook: dedup skipped %s (cooldown active)", cid[:12])
+                else:
+                    _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
+                    self._active_condition_ids[cid] = time.time() + _cooldown
 
         for sig in signals[:2]:
             if not self._within_global_limits():

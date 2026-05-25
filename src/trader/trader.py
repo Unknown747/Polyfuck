@@ -54,41 +54,51 @@ class Trader:
         self.clob = clob or ClobClient()
         self._trade_log: list[Trade] = []
         self._daily_trades: int = 0
-        self._open_position_count: int = 0
-        self._total_exposure_usd: float = 0.0
-        # Load persisted daily PnL so restarts don't reset the loss limit
-        self._daily_pnl: float = self._load_daily_pnl()
+        # FIX #3: load open_position_count and total_exposure from disk so that
+        # risk limits are not reset to zero on bot restart.
+        _state = self._load_daily_state()
+        self._daily_pnl: float           = _state.get("daily_pnl", 0.0)
+        self._open_position_count: int   = _state.get("open_positions", 0)
+        self._total_exposure_usd: float  = _state.get("total_exposure_usd", 0.0)
         # Trailing stop tracking: condition_id -> (entry_price, invested_usd)
         self._position_entry: dict[str, tuple[float, float]] = {}
         self._stops_triggered: int = 0
         # Current trade size (may be updated by auto-compound)
         self._current_trade_size: float = config.DEFAULT_TRADE_SIZE_USD
 
-    def _load_daily_pnl(self) -> float:
-        """Load today's PnL from disk. Returns 0 if no file or it's from a previous day."""
+    def _load_daily_state(self) -> dict:
+        """Load today's risk state from disk. Returns empty dict if stale or missing."""
         import json, datetime
         try:
             path = __import__("pathlib").Path(self._DAILY_STATE_FILE)
             if not path.exists():
-                return 0.0
+                return {}
             data = json.loads(path.read_text())
-            saved_date = data.get("date", "")
-            today = datetime.date.today().isoformat()
-            if saved_date != today:
-                return 0.0
-            return float(data.get("daily_pnl", 0.0))
+            if data.get("date", "") != datetime.date.today().isoformat():
+                return {}
+            return {
+                "daily_pnl":         float(data.get("daily_pnl", 0.0)),
+                "open_positions":    int(data.get("open_positions", 0)),
+                "total_exposure_usd":float(data.get("total_exposure_usd", 0.0)),
+            }
         except Exception:
-            return 0.0
+            return {}
+
+    # Keep old name as alias so existing callers still work
+    def _load_daily_pnl(self) -> float:
+        return self._load_daily_state().get("daily_pnl", 0.0)
 
     def _persist_daily_pnl(self) -> None:
-        """Write today's PnL to disk so restarts don't reset the loss limit."""
+        """Write today's full risk state to disk so restarts don't reset limits."""
         import json, datetime
         try:
             path = __import__("pathlib").Path(self._DAILY_STATE_FILE)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({
-                "date": datetime.date.today().isoformat(),
-                "daily_pnl": self._daily_pnl,
+                "date":              datetime.date.today().isoformat(),
+                "daily_pnl":        self._daily_pnl,
+                "open_positions":   self._open_position_count,
+                "total_exposure_usd": self._total_exposure_usd,
             }))
         except Exception:
             pass
@@ -273,11 +283,11 @@ class Trader:
                 yes_trade.market_question = opp.market_question
                 yes_trade.fee_estimate = profit_calc["total_fees"]
                 self._trade_log.append(yes_trade)
-                self._daily_pnl -= investment_usd
-                self._persist_daily_pnl()
                 self._daily_trades += 1
+                self._daily_pnl -= investment_usd
                 self._open_position_count += 1
                 self._total_exposure_usd += investment_usd
+                self._persist_daily_pnl()  # persist AFTER all counters are updated
                 # BUG FIX: register entry for trailing-stop tracking (live path was missing this)
                 self.register_entry(opp.condition_id, opp.yes_price, investment_usd)
                 console.print(
@@ -404,11 +414,11 @@ class Trader:
             if result:
                 result.market_question = opp.market_question
                 self._trade_log.append(result)
-                self._daily_pnl -= investment_usd
-                self._persist_daily_pnl()
                 self._daily_trades += 1
+                self._daily_pnl -= investment_usd
                 self._open_position_count += 1
                 self._total_exposure_usd += investment_usd
+                self._persist_daily_pnl()  # persist AFTER all counters are updated
                 # BUG FIX: register entry in live path for trailing-stop tracking
                 self.register_entry(opp.condition_id, buy_price, investment_usd)
                 console.print(
@@ -533,9 +543,9 @@ class Trader:
     def record_redemption(self, amount_usd: float) -> None:
         """Record that a redemption added funds back to the account."""
         self._daily_pnl += amount_usd
-        self._persist_daily_pnl()
         self._open_position_count = max(0, self._open_position_count - 1)
         self._total_exposure_usd = max(0.0, self._total_exposure_usd - amount_usd)
+        self._persist_daily_pnl()  # persist AFTER all counters are updated
 
     def cancel_all(self) -> bool:
         """Cancel all open orders."""

@@ -89,53 +89,98 @@ class CrashReboundSignal:
 # ── Sub-strategy: OrderbookSniper ─────────────────────────────────────────────
 
 class OrderbookSniper:
-    """Places 3-tier GTC limit orders at deep discounts in liquid markets."""
+    """Places 3-tier GTC limit orders at deep discounts in liquid markets.
 
-    TIERS = [
-        (1, 0.01),  # Tier 1: 1¢ price, 50% allocation
-        (2, 0.02),  # Tier 2: 2¢ price, 30% allocation
-        (3, 0.03),  # Tier 3: 3¢ price, 20% allocation
-    ]
-    TIER_ALLOC = {1: config.SNIPER_TIER1_PCT / 100,
-                  2: config.SNIPER_TIER2_PCT / 100,
-                  3: config.SNIPER_TIER3_PCT / 100}
+    FIX #6a: tier prices now read from config (SNIPER_TIER1_PRICE etc.) instead
+    of being hardcoded to 1¢/2¢/3¢.
+    FIX #6b: per-market + per-tier deduplication — only one pending order per
+    (condition_id, tier) is kept; re-placing the same order every scan is avoided.
+    FIX #6c: live path reuses the shared clob/trader instance rather than
+    creating a fresh Trader() per order, so accumulated risk counters are preserved.
+    """
 
-    def __init__(self, gamma=None, clob=None):
+    @property
+    def TIERS(self):
+        return [
+            (1, config.SNIPER_TIER1_PRICE),
+            (2, config.SNIPER_TIER2_PRICE),
+            (3, config.SNIPER_TIER3_PRICE),
+        ]
+
+    @property
+    def TIER_ALLOC(self):
+        return {
+            1: config.SNIPER_TIER1_PCT / 100,
+            2: config.SNIPER_TIER2_PCT / 100,
+            3: config.SNIPER_TIER3_PCT / 100,
+        }
+
+    def __init__(self, gamma=None, clob=None, trader=None, can_place=None):
         from src.utils.api import GammaClient, ClobClient
-        self.gamma: GammaClient = gamma or GammaClient()
-        self.clob:  ClobClient  = clob  or ClobClient()
+        self.gamma:  GammaClient = gamma  or GammaClient()
+        self.clob:   ClobClient  = clob   or ClobClient()
+        self._trader = trader   # shared Trader instance (optional, used in live mode)
+        # FIX #7: optional cross-strategy dedup predicate injected by orchestrator.
+        # Signature: (condition_id: str) -> bool — returns True if the market is
+        # not already in a cooldown window from another strategy.
+        self._can_place = can_place
         self._orders: list[SniperOrder] = []
         self._consecutive_failures: int = 0
         self.enabled: bool = True
+        # FIX #6b: track (condition_id, tier_num) pairs that already have a live order
+        self._placed: set[tuple[str, int]] = set()
 
-    def scan_and_place(self, categories: list[str] | None = None) -> list[SniperOrder]:
-        """Scan for high-liquidity markets and place 3-tier GTC orders."""
+    def scan(self, categories: list[str] | None = None) -> list[dict]:
+        """Phase 1 (parallel-safe): fetch candidate markets from the API only.
+
+        No orders are posted here. Call place() afterwards, once the
+        orchestrator has updated cross-strategy cooldowns via _apply_*.
+        """
         if not self.enabled or not config.SNIPER_ENABLED:
             return []
-
         self._cancel_expired()
-        markets = self._fetch_liquid_markets(categories)
-        placed: list[SniperOrder] = []
+        return self._fetch_liquid_markets(categories)[:5]
 
+    def place(self, markets: list[dict]) -> list[SniperOrder]:
+        """Phase 2 (sequential, post-cooldown-update): place tier orders.
+
+        Must be called AFTER the orchestrator has applied mispricing /
+        near-resolved / correlated results so _active_condition_ids is
+        up-to-date and _can_place() gives accurate same-cycle dedup.
+        """
+        placed: list[SniperOrder] = []
         total_budget = config.DEFAULT_TRADE_SIZE_USD
-        for market in markets[:5]:  # Limit to top 5 markets per scan
+        for market in markets:
             orders = self._place_tiers(market, total_budget)
             placed.extend(orders)
-
         return placed
 
+    def scan_and_place(self, categories: list[str] | None = None) -> list[SniperOrder]:
+        """Convenience wrapper (kept for backward-compat). Prefer scan()+place()."""
+        return self.place(self.scan(categories))
+
     def get_active_orders(self) -> list[SniperOrder]:
-        return [o for o in self._orders if o.status == "pending" and not o.is_expired]
+        return [o for o in self._orders if o.status in ("pending", "dry_run") and not o.is_expired]
 
     def _cancel_expired(self) -> None:
+        # Medium fix: expire both "pending" (live) and "dry_run" orders so _placed
+        # keys are cleared in long dry-run sessions and re-placement can occur.
         for order in self._orders:
-            if order.is_expired and order.status == "pending":
-                if not config.DRY_RUN and order.order_id:
+            if order.is_expired and order.status in ("pending", "dry_run"):
+                if order.status == "pending" and not config.DRY_RUN and order.order_id:
                     try:
                         self.clob.cancel_order(order.order_id)
                     except Exception as e:
                         logger.warning("OrderbookSniper: cancel failed %s: %s", order.order_id, e)
                 order.status = "cancelled_expired"
+        # Clear _placed keys for any order that just expired
+        expired_keys: set[tuple[str, int]] = set()
+        for o in self._orders:
+            if o.status == "cancelled_expired":
+                for tier_num, tier_price in self.TIERS:
+                    if o.price == tier_price:
+                        expired_keys.add((o.condition_id, tier_num))
+        self._placed -= expired_keys
         self._orders = [o for o in self._orders if o.status != "cancelled_expired"]
 
     def _place_tiers(self, market: dict, budget: float) -> list[SniperOrder]:
@@ -143,11 +188,29 @@ class OrderbookSniper:
         tokens = self._parse_tokens(market)
         condition_id = market.get("conditionId", "")
         question     = market.get("question", "")
+        token_id     = tokens.get("yes", "")
+
+        if not condition_id or not token_id:
+            return []
+
+        # FIX #7: cross-strategy dedup — if the orchestrator's cooldown registry
+        # says this market was already traded in another strategy this cycle,
+        # skip all tiers entirely before posting any order.
+        if self._can_place is not None and not self._can_place(condition_id):
+            logger.debug(
+                "OrderbookSniper: cross-strategy dedup skip %s (cooldown active)",
+                condition_id[:12],
+            )
+            return []
 
         for tier_num, price in self.TIERS:
-            alloc   = self.TIER_ALLOC.get(tier_num, 0.2)
-            size_usd= round(budget * alloc, 2)
-            token_id= tokens.get("yes", "")
+            # FIX #6b: skip if this (market, tier) already has a live pending order
+            dedup_key = (condition_id, tier_num)
+            if dedup_key in self._placed:
+                continue
+
+            alloc    = self.TIER_ALLOC.get(tier_num, 0.2)
+            size_usd = round(budget * alloc, 2)
 
             order = SniperOrder(
                 market_question= question,
@@ -165,22 +228,34 @@ class OrderbookSniper:
                     "OrderbookSniper DRY: Tier %d @ $%.2f × $%.2f in %s",
                     tier_num, price, size_usd, question[:40]
                 )
+                self._placed.add(dedup_key)
             else:
                 try:
                     if self.clob._authenticated:
-                        from src.trader.trader import Trader
-                        t = Trader(self.clob)
-                        trade = t._place_order(
-                            token_id=token_id,
-                            side="BUY",
-                            size=size_usd,
-                            price=price,
-                            condition_id=condition_id,
-                            order_type="GTC",
-                        )
+                        # FIX #6c: reuse shared trader if available; otherwise use clob directly
+                        if self._trader is not None:
+                            trade = self._trader._place_order(
+                                token_id=token_id,
+                                side="BUY",
+                                size=size_usd,
+                                price=price,
+                                condition_id=condition_id,
+                                order_type="GTC",
+                            )
+                        else:
+                            from src.trader.trader import Trader
+                            trade = Trader(self.clob)._place_order(
+                                token_id=token_id,
+                                side="BUY",
+                                size=size_usd,
+                                price=price,
+                                condition_id=condition_id,
+                                order_type="GTC",
+                            )
                         if trade:
                             order.order_id = trade.order_id or ""
                             order.status   = trade.status
+                            self._placed.add(dedup_key)
                 except Exception as e:
                     logger.warning("OrderbookSniper: place failed tier %d: %s", tier_num, e)
                     self._consecutive_failures += 1
@@ -645,17 +720,22 @@ class CrashReboundSniper:
 class LiquiditySniper:
     """Facade that coordinates all three sniper sub-strategies."""
 
-    def __init__(self, gamma=None, clob=None):
-        self.orderbook  = OrderbookSniper(gamma, clob)
+    def __init__(self, gamma=None, clob=None, trader=None, can_place=None):
+        self.orderbook  = OrderbookSniper(gamma, clob, trader=trader, can_place=can_place)
         self.endcycle   = EndcycleSniper(gamma)
         self.crash      = CrashReboundSniper(gamma)
         self._scan_count = 0
 
-    def run(self, categories: list[str] | None = None) -> dict:
-        """Run all sub-strategies and return combined results."""
+    def scan_markets(self, categories: list[str] | None = None) -> dict:
+        """Phase 1: API-only scan (safe to run in parallel with other strategies).
+
+        Returns candidate markets + endcycle/crash signals. No orders posted.
+        Call place_orders(scan_result) afterwards once cooldowns are updated.
+        """
         self._scan_count += 1
         results = {
-            "orderbook_orders":  [],
+            "orderbook_markets": [],  # raw market dicts for Phase 2 placement
+            "orderbook_orders":  [],  # filled in by place_orders()
             "endcycle_signals":  [],
             "crash_signals":     [],
             "crash_exits":       [],
@@ -663,9 +743,9 @@ class LiquiditySniper:
 
         try:
             if config.SNIPER_ENABLED:
-                results["orderbook_orders"] = self.orderbook.scan_and_place(categories)
+                results["orderbook_markets"] = self.orderbook.scan(categories)
         except Exception as e:
-            logger.error("LiquiditySniper: orderbook error: %s", e)
+            logger.error("LiquiditySniper: orderbook scan error: %s", e)
 
         try:
             if config.ENDCYCLE_ENABLED:
@@ -681,6 +761,25 @@ class LiquiditySniper:
             logger.error("LiquiditySniper: crash rebound error: %s", e)
 
         return results
+
+    def place_orders(self, scan_result: dict) -> dict:
+        """Phase 2: place orderbook orders using scan_result from scan_markets().
+
+        Must be called AFTER the orchestrator has applied all other strategies
+        so _active_condition_ids cooldowns are fully up-to-date.
+        """
+        try:
+            if config.SNIPER_ENABLED:
+                markets = scan_result.get("orderbook_markets", [])
+                scan_result["orderbook_orders"] = self.orderbook.place(markets)
+        except Exception as e:
+            logger.error("LiquiditySniper: orderbook place error: %s", e)
+        return scan_result
+
+    def run(self, categories: list[str] | None = None) -> dict:
+        """Legacy single-phase run (scan + place together). Kept for backward-compat."""
+        result = self.scan_markets(categories)
+        return self.place_orders(result)
 
     def get_active_orders(self) -> list[SniperOrder]:
         return self.orderbook.get_active_orders()

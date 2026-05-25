@@ -221,23 +221,29 @@ class NearResolvedScanner:
 
     @staticmethod
     def _hours_to_close(market: dict) -> float:
+        """FIX #5: use fromisoformat instead of strptime(s[:len(fmt)]).
+
+        The old code sliced s to len(fmt) characters — len(fmt) is the
+        *format string* length (e.g. 20), not the date value length, so
+        the slice was always wrong and every parse raised ValueError,
+        causing the method to return inf and bypassing the max_hours filter.
+        """
         raw = market.get("endDate") or market.get("endDateIso") or ""
         if not raw:
             return float("inf")
         try:
             s = str(raw).strip()
-            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
-                        "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-                try:
-                    dt = datetime.datetime.strptime(s[:len(fmt)], fmt).replace(
-                        tzinfo=datetime.timezone.utc
-                    )
-                    now = datetime.datetime.now(datetime.timezone.utc)
-                    delta = (dt - now).total_seconds() / 3600
-                    return delta
-                except ValueError:
-                    continue
-            return float("inf")
+            # Normalise Z suffix so fromisoformat accepts it (Python < 3.11)
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            # Append time component if only a date was provided
+            if "T" not in s:
+                s += "T00:00:00+00:00"
+            dt = datetime.datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            return (dt - now).total_seconds() / 3600
         except Exception:
             return float("inf")
 
