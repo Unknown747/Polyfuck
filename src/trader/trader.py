@@ -96,11 +96,16 @@ class Trader:
     def estimate_fee(self, price: float, size: float, category: str = "crypto") -> float:
         """Estimate taker fee for a trade.
 
-        Formula: fee = C × feeRate × p × (1 − p)
-        where C = shares, p = price
+        Polymarket taker fee = fee_rate × cost_in_usdc
+        where cost = shares × price.
+
+        BUG FIX: was `size * fee_rate * price * (1 - price)`. The `(1 - price)`
+        multiplier is wrong — it drives fees toward zero for near-resolved markets
+        (e.g. price=0.97 → 0.97×0.03=0.029 multiplier). Correct formula:
+        fee = shares × price × fee_rate (i.e. cost × fee_rate).
         """
         fee_rate = self.TAKER_FEE_RATES.get(category, 0.04)
-        fee = size * fee_rate * price * (1 - price)
+        fee = size * price * fee_rate
         return round(fee, 6)
 
     def calculate_profit_after_fees(

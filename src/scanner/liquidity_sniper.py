@@ -385,19 +385,20 @@ class EndcycleSniper:
             return float("inf")
         try:
             s = str(raw).strip()
-            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
-                        "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
-                try:
-                    dt = datetime.datetime.strptime(s[:len(fmt)], fmt).replace(
-                        tzinfo=datetime.timezone.utc
-                    )
-                    now = datetime.datetime.now(datetime.timezone.utc)
-                    return (dt - now).total_seconds() / 3600
-                except ValueError:
-                    continue
+            # BUG FIX: was strptime(s[:len(fmt)], fmt) — len(fmt) is the length of
+            # the format string (e.g. 19), not the length of the date value (20+).
+            # This always caused a ValueError, so the method always returned inf and
+            # EndcycleSniper never fired. Use fromisoformat instead (same approach
+            # as MarketScanner._hours_to_close which is known-correct).
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.datetime.fromisoformat(s if "T" in s else s + "T00:00:00+00:00")
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            return (dt - now).total_seconds() / 3600
         except Exception:
-            pass
-        return float("inf")
+            return float("inf")
 
     @staticmethod
     def _parse_prices(market: dict) -> list[float] | None:
