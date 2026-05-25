@@ -1,8 +1,11 @@
 """SQLite persistence — trades, opportunities, and daily P&L snapshots."""
 
+import logging
 import sqlite3
 import time
 from pathlib import Path
+
+_db_log = logging.getLogger("polymarket-bot")
 
 _DB_PATH = Path("logs/trades.db")
 
@@ -89,8 +92,8 @@ def insert_trade(trade, category: str = "", strategy: str = "") -> None:
                 ),
             )
             c.commit()
-    except Exception:
-        pass
+    except Exception as _e:
+        _db_log.warning("db.insert_trade failed: %s", _e)
 
 
 def get_trades(limit: int = 50) -> list[dict]:
@@ -141,8 +144,8 @@ def insert_opportunity(strategy: str, market: str, edge: float, executed: bool) 
                 ),
             )
             c.commit()
-    except Exception:
-        pass
+    except Exception as _e:
+        _db_log.warning("db.insert_opportunity failed: %s", _e)
 
 
 def get_opportunities(limit: int = 100) -> list[dict]:
@@ -189,8 +192,8 @@ def upsert_daily_pnl(
                     (time.time(), today, mispricing, near_resolved, correlation, sniper, total),
                 )
             c.commit()
-    except Exception:
-        pass
+    except Exception as _e:
+        _db_log.warning("db.upsert_daily_pnl failed: %s", _e)
 
 
 def get_daily_pnl_history(days: int = 30) -> list[dict]:

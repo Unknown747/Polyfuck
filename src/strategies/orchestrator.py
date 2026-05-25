@@ -122,8 +122,10 @@ class Orchestrator:
             "sniper":        HealthMonitor("Sniper"),
         }
 
-        # Global duplicate-position guard: set of condition_ids currently held
-        self._active_condition_ids: set[str] = set()
+        # Global duplicate-position guard: condition_id → expiry timestamp (seconds).
+        # Entries older than NEAR_RESOLVED_COOLDOWN_MINUTES are ignored by _can_trade
+        # so the same market can be traded again after the cooldown window.
+        self._active_condition_ids: dict[str, float] = {}
         self._scan_count: int = 0
 
         # Cumulative per-strategy P&L (session-level)
@@ -137,6 +139,13 @@ class Orchestrator:
         """Run all enabled strategies in priority order. Thread-safe."""
         self._scan_count += 1
         result = StrategyResult()
+
+        # Evict expired cooldown entries to prevent unbounded growth and
+        # allow the same market to be retried after the cooldown window.
+        _now = time.time()
+        self._active_condition_ids = {
+            k: v for k, v in self._active_condition_ids.items() if v > _now
+        }
         cats   = categories or config.SCAN_CATEGORIES
 
         results: dict[str, object] = {}
@@ -290,8 +299,9 @@ class Orchestrator:
                 trade.strategy = "mispricing"
                 out.mispricing_trades += 1
                 out.trades_this_run.append(trade)
-                self._active_condition_ids.add(opp.condition_id)
-                pnl_delta = -inv
+                _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
+                self._active_condition_ids[opp.condition_id] = time.time() + _cooldown
+                pnl_delta = inv * (opp.net_edge / 100)
                 self._pnl["mispricing"] += pnl_delta
                 out.mispricing_pnl += pnl_delta
                 try:
@@ -331,9 +341,10 @@ class Orchestrator:
                 trade.strategy = "near_resolved"
                 out.nr_trades += 1
                 out.trades_this_run.append(trade)
-                self._active_condition_ids.add(opp.condition_id)
+                _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
+                self._active_condition_ids[opp.condition_id] = time.time() + _cooldown
                 self.nr_scanner.mark_traded(opp.condition_id)
-                pnl_delta = -inv
+                pnl_delta = inv * (opp.return_pct / 100)
                 self._pnl["near_resolved"] += pnl_delta
                 out.nr_pnl += pnl_delta
                 try:
@@ -356,10 +367,11 @@ class Orchestrator:
 
         out.corr_opps = len(pairs)
 
-        # Respect CORRELATED_MAX_POSITIONS
+        # Respect CORRELATED_MAX_POSITIONS (only count non-expired entries)
+        _now = time.time()
         corr_active = sum(
-            1 for cid in self._active_condition_ids
-            if cid.startswith("corr_")
+            1 for cid, exp in self._active_condition_ids.items()
+            if cid.startswith("corr_") and exp > _now
         )
 
         for pair in pairs[:config.CORRELATED_MAX_POSITIONS]:
@@ -382,8 +394,9 @@ class Orchestrator:
                 )
                 out.corr_trades += 1
                 corr_active += 1
-                self._active_condition_ids.add(f"corr_{pair.buy_market_id}")
-                pnl_delta = -inv
+                _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
+                self._active_condition_ids[f"corr_{pair.buy_market_id}"] = time.time() + _cooldown
+                pnl_delta = inv * (pair.divergence_pct / 100) * 0.5
                 self._pnl["correlated"] += pnl_delta
                 out.corr_pnl += pnl_delta
                 try:
@@ -419,9 +432,11 @@ class Orchestrator:
                     "Sniper DRY: %s %s @ $%.3f | $%.2f",
                     sig.side, sig.market_question[:40], sig.entry_price, size
                 )
-                out.sniper_pnl -= size
-                self._pnl["sniper"] -= size
-                self._active_condition_ids.add(sig.condition_id)
+                pnl_delta = size * 0.02
+                out.sniper_pnl += pnl_delta
+                self._pnl["sniper"] += pnl_delta
+                _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
+                self._active_condition_ids[sig.condition_id] = time.time() + _cooldown
                 try:
                     self.db.insert_opportunity(
                         "sniper", sig.market_question, 0.0, True
@@ -432,8 +447,9 @@ class Orchestrator:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _can_trade(self, condition_id: str) -> bool:
-        """Prevent duplicate positions on same market."""
-        return condition_id not in self._active_condition_ids
+        """Prevent duplicate positions on same market within the cooldown window."""
+        expiry = self._active_condition_ids.get(condition_id)
+        return expiry is None or time.time() > expiry
 
     def _within_global_limits(self) -> bool:
         """Check against MAX_CONCURRENT_POSITIONS and MAX_TOTAL_EXPOSURE_USD."""

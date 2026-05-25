@@ -142,7 +142,7 @@ class Backtester:
         investment = config.DEFAULT_TRADE_SIZE_USD
         shares     = investment / entry_price
         payout     = shares * 1.00 if won else 0.0
-        fee_est    = investment * self.TAKER_FEE * entry_price * (1.0 - entry_price)
+        fee_est    = investment * self.TAKER_FEE
         gross      = payout - investment
         net_profit = gross - fee_est
         roi_pct    = (net_profit / investment * 100) if investment > 0 else 0.0
@@ -180,9 +180,7 @@ class Backtester:
 
         num_pairs   = investment / cost_per_pair
         payout      = num_pairs * 1.00          # Always pays $1 per pair on resolution
-        yes_fee     = investment / 2 * self.TAKER_FEE * yes_price * (1 - yes_price)
-        no_fee      = investment / 2 * self.TAKER_FEE * no_price  * (1 - no_price)
-        fee_est     = yes_fee + no_fee
+        fee_est     = investment * self.TAKER_FEE
         gross       = payout - investment
         net_profit  = gross - fee_est
         roi_pct     = (net_profit / investment * 100) if investment > 0 else 0.0

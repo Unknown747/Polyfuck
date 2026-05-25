@@ -167,21 +167,20 @@ class OrderbookSniper:
                 )
             else:
                 try:
-                    # Real order placement (only if authenticated)
                     if self.clob._authenticated:
                         from src.trader.trader import Trader
                         t = Trader(self.clob)
-                        # Use internal _place_order via a light wrapper
-                        result = self.clob.place_order(
+                        trade = t._place_order(
                             token_id=token_id,
                             side="BUY",
                             size=size_usd,
                             price=price,
+                            condition_id=condition_id,
                             order_type="GTC",
                         )
-                        if result:
-                            order.order_id = str(result.get("orderID", ""))
-                            order.status   = "pending"
+                        if trade:
+                            order.order_id = trade.order_id or ""
+                            order.status   = trade.status
                 except Exception as e:
                     logger.warning("OrderbookSniper: place failed tier %d: %s", tier_num, e)
                     self._consecutive_failures += 1

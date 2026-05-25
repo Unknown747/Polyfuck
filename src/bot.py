@@ -60,7 +60,7 @@ class _ErrorCapture(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         _error_log.append({
-            "time":  self.formatTime(record, "%H:%M:%S"),
+            "time":  logging.Formatter().formatTime(record, "%H:%M:%S"),
             "level": record.levelname,
             "msg":   record.getMessage()[:200],
         })
@@ -459,23 +459,6 @@ _stats: dict = {
     "active_pairs":          [],
     "active_sniper_orders":  0,
 }
-
-
-def _append_opp_log(row: dict) -> None:
-    """Append a logged opportunity row (from opp_logger) to the dashboard feed."""
-    # BUG FIX: timestamp format is "2026-05-25 12:31:05 UTC"; [-8:] gives "5 UTC" (wrong).
-    # Split on space and take the time token (index 1) instead.
-    ts_parts = row.get("timestamp", "").split(" ")
-    time_str = ts_parts[1] if len(ts_parts) >= 2 else "–"
-    entry = {
-        "time":      time_str,
-        "market":    row.get("market", ""),
-        "edge_pct":  row.get("edge_pct", 0),
-        "executed":  row.get("executed", False),
-    }
-    log = _stats.get("opp_log", [])
-    log.append(entry)
-    _stats["opp_log"] = log[-20:]
 
 
 # ── Dashboard HTML ──────────────────────────────────────────────────────────
