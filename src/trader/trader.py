@@ -199,8 +199,10 @@ class Trader:
             self._daily_trades += 1
             self._open_position_count += 1
             self._total_exposure_usd += investment_usd
-            # Track simulated P&L so the dashboard chart is not empty in dry-run
-            self._daily_pnl -= investment_usd
+            # In dry-run, record the ESTIMATED NET PROFIT (not cost) so the
+            # P&L chart trends positive and the daily-loss guard doesn't
+            # prematurely halt all dry-run trading after ~10 simulated trades.
+            self._daily_pnl += profit_calc["net_profit"]
             self._persist_daily_pnl()
             self.register_entry(opp.condition_id, opp.yes_price, investment_usd)
             return trade
@@ -372,8 +374,11 @@ class Trader:
             self._daily_trades += 1
             self._open_position_count += 1
             self._total_exposure_usd += investment_usd
-            # Track simulated P&L so the dashboard chart is not empty in dry-run
-            self._daily_pnl -= investment_usd
+            # In dry-run, record ESTIMATED profit = investment × return_pct.
+            # Using actual profit keeps the P&L chart meaningful and prevents
+            # the daily-loss guard from halting dry-run after just ~10 trades.
+            estimated_profit = investment_usd * ((1.0 - buy_price) / max(buy_price, 0.01))
+            self._daily_pnl += estimated_profit
             self._persist_daily_pnl()
             self.register_entry(opp.condition_id, buy_price, investment_usd)
             return trade

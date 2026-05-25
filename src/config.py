@@ -13,15 +13,15 @@ class Config:
     DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
 
     # === Capital & position sizing ===
-    MAX_POSITION_USD: float = float(os.getenv("MAX_POSITION_USD", "3"))
+    MAX_POSITION_USD: float = float(os.getenv("MAX_POSITION_USD", "5"))
     DEFAULT_TRADE_SIZE_USD: float = float(os.getenv("DEFAULT_TRADE_SIZE_USD", "2"))
     MAX_TOTAL_EXPOSURE_USD: float = float(os.getenv("MAX_TOTAL_EXPOSURE_USD", "200"))
 
     # === Safety limits ===
     MAX_DAILY_LOSS_USD: float = float(os.getenv("MAX_DAILY_LOSS_USD", "20"))
-    MIN_EDGE_PCT: float = float(os.getenv("MIN_EDGE_PCT", "2.0"))
-    MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "4"))
-    MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "10"))
+    MIN_EDGE_PCT: float = float(os.getenv("MIN_EDGE_PCT", "1.0"))
+    MAX_OPEN_POSITIONS: int = int(os.getenv("MAX_OPEN_POSITIONS", "10"))
+    MAX_CONCURRENT_POSITIONS: int = int(os.getenv("MAX_CONCURRENT_POSITIONS", "20"))
     POSITION_COOLDOWN_MINUTES: int = int(os.getenv("POSITION_COOLDOWN_MINUTES", "360"))
 
     # === Trailing Stop-Loss ===
@@ -64,8 +64,8 @@ class Config:
     # ─── Mispricing ──────────────────────────────────────────────────────────
     AGGRESSIVE_EDGE: float  = float(os.getenv("AGGRESSIVE_EDGE",  "5.0"))
     CONSERVATIVE_EDGE: float= float(os.getenv("CONSERVATIVE_EDGE","1.0"))
-    MIN_LIQUIDITY_USD: float= float(os.getenv("MIN_LIQUIDITY_USD", "5000"))
-    MAX_SPREAD_PCT: float   = float(os.getenv("MAX_SPREAD_PCT",    "2.0"))
+    MIN_LIQUIDITY_USD: float= float(os.getenv("MIN_LIQUIDITY_USD", "1000"))
+    MAX_SPREAD_PCT: float   = float(os.getenv("MAX_SPREAD_PCT",    "5.0"))
 
     # ─── Near-Resolved ───────────────────────────────────────────────────────
     NEAR_RESOLVED_MIN_EDGE: float  = float(os.getenv("NEAR_RESOLVED_MIN_EDGE", "3.0"))

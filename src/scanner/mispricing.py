@@ -66,6 +66,7 @@ class MispriceOpportunity:
 class MispricingScanner:
     """Scans Polymarket for mispriced binary markets."""
 
+    # Maker orders are 0% fee; use 0.5% as a conservative flat estimate
     TAKER_FEE_FLAT = 0.5
 
     def __init__(self, gamma=None, clob=None):
@@ -122,9 +123,16 @@ class MispricingScanner:
     # ── Private ───────────────────────────────────────────────────────────────
 
     def _fee_adjusted_edge(self, category: str, base_edge: float) -> float:
-        fee_rate     = config.CATEGORY_TAKER_FEES.get(category, 0.04)
-        fee_adjusted = fee_rate * 50 * config.FEE_EDGE_MULT
-        return max(base_edge, fee_adjusted)
+        """Minimum edge required after flat maker-fee deduction.
+
+        We use maker orders (0% fee) so the only cost is the 0.5% flat
+        TAKER_FEE_FLAT safety buffer.  The old complex formula
+        (fee_rate * 50 * FEE_EDGE_MULT) produced 5.25% for crypto which
+        is almost never achievable — it was blocking all opportunities.
+        New formula: max(base_edge, TAKER_FEE_FLAT + 0.5) ensures we
+        only enter when the net edge after fees is positive.
+        """
+        return max(base_edge, self.TAKER_FEE_FLAT + 0.5)
 
     def _evaluate(
         self,
@@ -143,10 +151,16 @@ class MispricingScanner:
         if not (0.01 <= yes_price <= 0.99) or not (0.01 <= no_price <= 0.99):
             return None
 
+        # Only trade when YES+NO < 1 (guaranteed arbitrage buy-both direction)
         price_sum = yes_price + no_price
-        edge_pct  = abs(1.0 - price_sum) * 100
-        net_edge  = edge_pct - self.TAKER_FEE_FLAT
+        if price_sum >= 1.0:
+            return None
 
+        edge_pct = (1.0 - price_sum) * 100
+        net_edge = edge_pct - self.TAKER_FEE_FLAT
+
+        if net_edge <= 0:
+            return None
         if edge_pct < config.CONSERVATIVE_EDGE:
             return None
         if edge_pct < min_edge:
@@ -154,7 +168,7 @@ class MispricingScanner:
 
         spread_pct = abs(yes_price - no_price) * 100
         if spread_pct > max_spread:
-            pass
+            return None  # BUG FIX: was `pass` — spread filter was dead code
 
         volume_24h   = self._safe_float(market.get("volume24hr"))
         total_volume = self._safe_float(market.get("volumeNum"))

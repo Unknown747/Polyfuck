@@ -274,7 +274,7 @@ class Orchestrator:
 
         out.mispricing_opps = len(opps)
 
-        for opp in opps[:3]:  # Try top 3
+        for opp in opps[:5]:  # Try top 5
             if not self._can_trade(opp.condition_id):
                 continue
             if not self._within_global_limits():
@@ -314,7 +314,7 @@ class Orchestrator:
 
         out.nr_opps = len(opps)
 
-        for opp in opps[:2]:  # Try top 2
+        for opp in opps[:5]:  # Try top 5 per scan
             if not self._can_trade(opp.condition_id):
                 continue
             if not self._within_global_limits():
