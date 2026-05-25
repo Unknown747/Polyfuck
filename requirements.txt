@@ -1,10 +1,9 @@
 py-clob-client-v2>=1.0.1
-web3>=6.0.0
+web3>=7.15.0
 eth-account>=0.10.0
 requests>=2.33.0
 python-dotenv>=1.2.2
 rich>=13.0.0
 pandas>=2.0.0
 numpy>=1.24.0
-python-dotenv>=1.2.2
-requests>=2.33.0
+web3>=7.15.0

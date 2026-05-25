@@ -199,6 +199,7 @@ class AutoRedeemer:
             return result
 
         try:
+            from web3 import Web3 as _Web3
             w3  = self._get_web3()
             ctf = self._get_ctf_contract(w3)
 
@@ -216,6 +217,7 @@ class AutoRedeemer:
             tx_hex  = ""
 
             for collateral in collateral_candidates:
+                tx_broadcast = False   # track whether send_raw_transaction was called
                 try:
                     tx = ctf.functions.redeemPositions(
                         collateral,   # collateralToken
@@ -230,9 +232,10 @@ class AutoRedeemer:
                         **gas_price,
                     })
 
-                    signed  = w3.eth.account.sign_transaction(tx, private_key=self.private_key)
-                    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-                    tx_hex  = tx_hash.hex()
+                    signed      = w3.eth.account.sign_transaction(tx, private_key=self.private_key)
+                    tx_hash     = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    tx_broadcast = True   # tx is now in the mempool — nonce is consumed
+                    tx_hex      = tx_hash.hex()
 
                     receipt = w3.eth.wait_for_transaction_receipt(
                         tx_hash, timeout=120, poll_latency=3
@@ -249,14 +252,17 @@ class AutoRedeemer:
                             "Redemption reverted with collateral %s, trying next...",
                             collateral[:10]
                         )
-                        nonce += 1   # bump nonce for the retry tx
+                        nonce += 1   # reverted tx still consumes the nonce on-chain
                         receipt = None
                 except Exception as leg_err:
                     logger.warning(
                         "Redemption leg failed (collateral %s): %s — trying next",
                         collateral[:10], leg_err
                     )
-                    nonce += 1
+                    # Only bump nonce if the tx was already broadcast (nonce consumed).
+                    # If build_transaction or sign_transaction failed, nonce is still free.
+                    if tx_broadcast:
+                        nonce += 1
                     continue
 
             if receipt is not None and receipt.status == 1:
@@ -332,10 +338,11 @@ class AutoRedeemer:
         can get stuck when base fee spikes.
         """
         try:
+            from web3 import Web3 as _Web3
             base_fee = w3.eth.gas_price
             return {
                 "maxFeePerGas":        int(base_fee * 1.3),
-                "maxPriorityFeePerGas": w3.to_wei(30, "gwei"),
+                "maxPriorityFeePerGas": _Web3.to_wei(30, "gwei"),
             }
         except Exception:
             # Fallback to legacy pricing if fee history is unavailable
