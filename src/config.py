@@ -55,6 +55,11 @@ class Config:
     AUTO_REDEEM: bool = os.getenv("AUTO_REDEEM", "true").lower() in ("true", "1", "yes")
     REDEEM_CHECK_INTERVAL: int = int(os.getenv("REDEEM_CHECK_INTERVAL", "5"))
 
+    # === Position reconciler ===
+    # How often (in scan cycles) to cross-check in-memory counters against the API.
+    # Live mode only. Set to 0 to disable.
+    RECONCILE_INTERVAL: int = int(os.getenv("RECONCILE_INTERVAL", "5"))
+
     # ─── Strategy Toggles ────────────────────────────────────────────────────
     MISPRICING_ENABLED: bool    = os.getenv("MISPRICING_ENABLED", "true").lower() in ("true","1","yes")
     NEAR_RESOLVED_ENABLED: bool = os.getenv("NEAR_RESOLVED_ENABLED", "true").lower() in ("true","1","yes")

@@ -575,6 +575,88 @@ class Trader:
             console.print(f"[red]Cancel failed: {e}[/]")
             return False
 
+    def reconcile_counters(self, positions: list) -> dict:
+        """Cross-check in-memory risk counters against live API positions.
+
+        Compares _open_position_count and _total_exposure_usd against real
+        data from PositionTracker and corrects any drift that has built up
+        from missed counter updates (e.g. partial fills, missed closes, bot
+        restarts mid-day).
+
+        Args:
+            positions: list of Position objects from PositionTracker.refresh_positions()
+
+        Returns:
+            dict with keys:
+              api_count       — positions seen on-chain (non-redeemable)
+              api_exposure    — sum of initial_value for those positions
+              corrections     — dict of fields that were corrected (empty if clean)
+        """
+        import logging
+        _log = logging.getLogger("polymarket-bot")
+
+        # Only count active (non-redeemable) positions with real size.
+        active = [
+            p for p in positions
+            if not getattr(p, "is_redeemable", False) and float(getattr(p, "size", 0) or 0) > 0
+        ]
+        api_count    = len(active)
+        api_exposure = sum(float(getattr(p, "initial_value", 0) or 0) for p in active)
+
+        corrections: dict = {}
+
+        # ── Open position count ──────────────────────────────────────────────
+        count_drift = self._open_position_count - api_count
+        if abs(count_drift) >= 1:
+            _log.warning(
+                "Reconciler: open_position_count drift — "
+                "in-memory=%d  API=%d  (delta=%+d) — correcting.",
+                self._open_position_count, api_count, count_drift,
+            )
+            corrections["open_positions"] = {
+                "was": self._open_position_count,
+                "now": api_count,
+                "delta": count_drift,
+            }
+            self._open_position_count = api_count
+
+        # ── Total exposure ───────────────────────────────────────────────────
+        # Allow ±$1.00 tolerance to avoid noisy micro-corrections from rounding.
+        exposure_drift = self._total_exposure_usd - api_exposure
+        if abs(exposure_drift) >= 1.0:
+            _log.warning(
+                "Reconciler: total_exposure_usd drift — "
+                "in-memory=$%.2f  API=$%.2f  (delta=%+.2f) — correcting.",
+                self._total_exposure_usd, api_exposure, exposure_drift,
+            )
+            corrections["total_exposure_usd"] = {
+                "was": round(self._total_exposure_usd, 4),
+                "now": round(api_exposure, 4),
+                "delta": round(exposure_drift, 4),
+            }
+            self._total_exposure_usd = api_exposure
+
+        if corrections:
+            self._persist_daily_pnl()
+            console.print(
+                f"[yellow]⚠️  Reconciler corrected counters: "
+                f"positions {corrections.get('open_positions', {}).get('was', '—')} → "
+                f"{self._open_position_count} | "
+                f"exposure ${corrections.get('total_exposure_usd', {}).get('was', self._total_exposure_usd):.2f} → "
+                f"${self._total_exposure_usd:.2f}[/]"
+            )
+        else:
+            _log.debug(
+                "Reconciler: counters clean — %d positions / $%.2f exposure",
+                api_count, api_exposure,
+            )
+
+        return {
+            "api_count":    api_count,
+            "api_exposure": round(api_exposure, 4),
+            "corrections":  corrections,
+        }
+
     def get_trade_history(self) -> list[Trade]:
         return self._trade_log.copy()
 

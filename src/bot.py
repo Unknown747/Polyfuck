@@ -232,7 +232,7 @@ class PolymarketBot:
                 ]
                 _stats["active_sniper_orders"] = len(orch_result.active_sniper_orders)
 
-                # 2. Check trailing stops every scan
+                # 2. Check trailing stops + reconcile counters (live mode only)
                 if self.positions and not self.dry_run:
                     current_positions = self.positions.refresh_positions()
                     if current_positions:
@@ -241,6 +241,15 @@ class PolymarketBot:
                             console.print(
                                 f"[red]🛑 {len(stopped)} position(s) closed by trailing stop[/]"
                             )
+
+                        # Reconcile in-memory risk counters with live API every N scans.
+                        if (config.RECONCILE_INTERVAL > 0
+                                and self._scan_count % config.RECONCILE_INTERVAL == 0):
+                            recon = self.trader.reconcile_counters(current_positions)
+                            if recon["corrections"]:
+                                logger.info(
+                                    "Reconciler applied corrections: %s", recon["corrections"]
+                                )
 
                 # 3. Auto-redeem resolved positions every N scans
                 if (
