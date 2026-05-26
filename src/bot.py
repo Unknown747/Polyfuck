@@ -95,12 +95,15 @@ class PolymarketBot:
         self._total_redeemed_usd  = 0.0
         self._near_resolved_found = 0
 
+        # 'paper' or 'live' — used to filter DB reads so modes never mix
+        self._db_mode: str = "paper" if self.dry_run else "live"
+
         # Initialise SQLite trade history and wallet balance cache
         trade_db.init_db()
         self._wallet_balance: float = 0.0
 
         # Strategy orchestrator (handles all 4 strategies)
-        self.orchestrator = Orchestrator(self.trader, self.gamma, self.clob)
+        self.orchestrator = Orchestrator(self.trader, self.gamma, self.clob, dry_run=self.dry_run)
 
         # Per-strategy cumulative counters (session-level)
         self._strategy_stats: dict = {
@@ -353,7 +356,7 @@ class PolymarketBot:
             "near_resolved":   self._near_resolved_found,
             "trades":          self._trades_executed,
             "open_positions":  daily["open_positions"],
-            "max_positions":   config.MAX_CONCURRENT_POSITIONS,
+            "max_positions":   config.MAX_OPEN_POSITIONS,
             "exposure":        daily["total_exposure_usd"],
             "max_exposure":    config.MAX_TOTAL_EXPOSURE_USD,
             "daily_pnl":       daily["daily_pnl"],
@@ -367,7 +370,7 @@ class PolymarketBot:
             "opp_stats":       opp_logger.get_stats(),
             "category_stats":  self.orchestrator.get_category_stats(),
             "wallet_balance":  self._wallet_balance,
-            "db_stats":        trade_db.get_db_stats(),
+            "db_stats":        trade_db.get_db_stats(mode=self._db_mode),
             "strategy_stats":  self._strategy_stats,
             "strategy_pnl":    orch_pnl,
             "strategy_health": orch_health,
@@ -875,7 +878,8 @@ def _start_health_server() -> None:
                 })
 
             elif self.path.startswith("/api/trades"):
-                self._send_json(trade_db.get_trades(50))
+                _mode = "live" if _stats.get("mode") == "LIVE" else "paper"
+                self._send_json(trade_db.get_trades(50, mode=_mode))
 
             elif self.path.startswith("/api/errors"):
                 self._send_json(list(_error_log))

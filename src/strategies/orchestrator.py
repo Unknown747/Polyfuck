@@ -97,7 +97,7 @@ class HealthMonitor:
 class Orchestrator:
     """Coordinates all 4 strategies with priority enforcement and safety guards."""
 
-    def __init__(self, trader: "Trader", gamma=None, clob=None):
+    def __init__(self, trader: "Trader", gamma=None, clob=None, dry_run: bool | None = None):
         from src.utils.api import GammaClient, ClobClient
         from src.scanner.mispricing import MispricingScanner
         from src.scanner.near_resolved import NearResolvedScanner
@@ -129,6 +129,10 @@ class Orchestrator:
         # so the same market can be traded again after the cooldown window.
         self._active_condition_ids: dict[str, float] = {}
         self._scan_count: int = 0
+
+        # 'paper' or 'live' — tags every DB row so stats never mix across modes
+        _is_dry = dry_run if dry_run is not None else config.DRY_RUN
+        self._mode: str = "paper" if _is_dry else "live"
 
         # Cumulative per-strategy P&L (session-level)
         self._pnl: dict[str, float] = {
@@ -215,6 +219,7 @@ class Orchestrator:
                 near_resolved=self._pnl["near_resolved"],
                 correlation=  self._pnl["correlated"],
                 sniper=       self._pnl["sniper"],
+                mode=         self._mode,
             )
         except Exception as e:
             logger.warning("Orchestrator: failed to persist daily_pnl: %s", e)
@@ -353,13 +358,13 @@ class Orchestrator:
                 self._pnl["mispricing"] += pnl_delta
                 out.mispricing_pnl += pnl_delta
                 try:
-                    self.db.insert_trade(trade, category, "mispricing")
-                    self.db.insert_opportunity("mispricing", opp.market_question, opp.edge_pct, True)
+                    self.db.insert_trade(trade, category, "mispricing", mode=self._mode)
+                    self.db.insert_opportunity("mispricing", opp.market_question, opp.edge_pct, True, mode=self._mode)
                 except Exception:
                     pass
             else:
                 try:
-                    self.db.insert_opportunity("mispricing", opp.market_question, opp.edge_pct, False)
+                    self.db.insert_opportunity("mispricing", opp.market_question, opp.edge_pct, False, mode=self._mode)
                 except Exception:
                     pass
 
@@ -396,13 +401,13 @@ class Orchestrator:
                 self._pnl["near_resolved"] += pnl_delta
                 out.nr_pnl += pnl_delta
                 try:
-                    self.db.insert_trade(trade, "", "near_resolved")
-                    self.db.insert_opportunity("near_resolved", opp.market_question, opp.return_pct, True)
+                    self.db.insert_trade(trade, "", "near_resolved", mode=self._mode)
+                    self.db.insert_opportunity("near_resolved", opp.market_question, opp.return_pct, True, mode=self._mode)
                 except Exception:
                     pass
             else:
                 try:
-                    self.db.insert_opportunity("near_resolved", opp.market_question, opp.return_pct, False)
+                    self.db.insert_opportunity("near_resolved", opp.market_question, opp.return_pct, False, mode=self._mode)
                 except Exception:
                     pass
 
@@ -458,7 +463,7 @@ class Orchestrator:
                 out.corr_pnl += pnl_delta
                 try:
                     self.db.insert_opportunity(
-                        "correlated", pair.description[:100], pair.divergence_pct, True
+                        "correlated", pair.description[:100], pair.divergence_pct, True, mode=self._mode
                     )
                 except Exception:
                     pass
@@ -538,7 +543,7 @@ class Orchestrator:
                     out.corr_pnl += pnl_delta
                     try:
                         self.db.insert_opportunity(
-                            "correlated", pair.description[:100], pair.divergence_pct, True
+                            "correlated", pair.description[:100], pair.divergence_pct, True, mode=self._mode
                         )
                     except Exception:
                         pass
@@ -590,7 +595,7 @@ class Orchestrator:
                 self._active_condition_ids[sig.condition_id] = time.time() + _cooldown
                 try:
                     self.db.insert_opportunity(
-                        "sniper", sig.market_question, 0.0, True
+                        "sniper", sig.market_question, 0.0, True, mode=self._mode
                     )
                 except Exception:
                     pass
@@ -617,9 +622,9 @@ class Orchestrator:
                         _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
                         self._active_condition_ids[sig.condition_id] = time.time() + _cooldown
                         try:
-                            self.db.insert_trade(trade, "", "sniper")
+                            self.db.insert_trade(trade, "", "sniper", mode=self._mode)
                             self.db.insert_opportunity(
-                                "sniper", sig.market_question, 0.0, True
+                                "sniper", sig.market_question, 0.0, True, mode=self._mode
                             )
                         except Exception:
                             pass

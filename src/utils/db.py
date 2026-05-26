@@ -1,4 +1,8 @@
-"""SQLite persistence — trades, opportunities, and daily P&L snapshots."""
+"""SQLite persistence — trades, opportunities, and daily P&L snapshots.
+
+Every row is tagged with `mode` ('paper' or 'live') so paper-trading stats
+and live-trading stats are NEVER mixed together.
+"""
 
 import logging
 import sqlite3
@@ -20,7 +24,7 @@ def _conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create all tables if they do not exist."""
+    """Create all tables if they do not exist, and migrate existing schemas."""
     with _conn() as c:
         c.execute("""
             CREATE TABLE IF NOT EXISTS trades (
@@ -37,7 +41,8 @@ def init_db() -> None:
                 status       TEXT,
                 fee_estimate REAL,
                 category     TEXT,
-                strategy     TEXT
+                strategy     TEXT,
+                mode         TEXT    NOT NULL DEFAULT 'paper'
             )
         """)
         c.execute("""
@@ -48,7 +53,8 @@ def init_db() -> None:
                 strategy  TEXT    NOT NULL,
                 market    TEXT    NOT NULL,
                 edge      REAL,
-                executed  INTEGER DEFAULT 0
+                executed  INTEGER DEFAULT 0,
+                mode      TEXT    NOT NULL DEFAULT 'paper'
             )
         """)
         c.execute("""
@@ -56,6 +62,7 @@ def init_db() -> None:
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts                REAL    NOT NULL,
                 date              TEXT    NOT NULL,
+                mode              TEXT    NOT NULL DEFAULT 'paper',
                 mispricing_pnl    REAL    DEFAULT 0,
                 near_resolved_pnl REAL    DEFAULT 0,
                 correlation_pnl   REAL    DEFAULT 0,
@@ -64,18 +71,32 @@ def init_db() -> None:
             )
         """)
 
+        # ── Migrate existing databases that lack the `mode` column ──────────
+        for table in ("trades", "opportunities", "daily_pnl"):
+            try:
+                c.execute(
+                    f"ALTER TABLE {table} ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'"
+                )
+            except sqlite3.OperationalError:
+                pass  # Column already exists — safe to ignore
+
 
 # ── Trades ────────────────────────────────────────────────────────────────────
 
-def insert_trade(trade, category: str = "", strategy: str = "") -> None:
-    """Persist a Trade dataclass record."""
+def insert_trade(
+    trade,
+    category: str = "",
+    strategy: str = "",
+    mode: str = "paper",
+) -> None:
+    """Persist a Trade dataclass record tagged with `mode`."""
     try:
         with _conn() as c:
             c.execute(
                 """INSERT INTO trades
                    (ts, timestamp, market, condition_id, token_id, side,
-                    price, size, order_type, status, fee_estimate, category, strategy)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    price, size, order_type, status, fee_estimate, category, strategy, mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     trade.timestamp,
                     time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(trade.timestamp)),
@@ -90,6 +111,7 @@ def insert_trade(trade, category: str = "", strategy: str = "") -> None:
                     getattr(trade, "fee_estimate", 0.0),
                     category,
                     strategy,
+                    mode,
                 ),
             )
             c.commit()
@@ -97,44 +119,75 @@ def insert_trade(trade, category: str = "", strategy: str = "") -> None:
         _db_log.warning("db.insert_trade failed: %s", _e)
 
 
-def get_trades(limit: int = 50) -> list[dict]:
-    """Return the most recent trades as plain dicts."""
+def get_trades(limit: int = 50, mode: str | None = None) -> list[dict]:
+    """Return the most recent trades. Pass `mode` to restrict to paper or live."""
     try:
         with _conn() as c:
-            rows = c.execute(
-                "SELECT * FROM trades ORDER BY ts DESC LIMIT ?", (limit,)
-            ).fetchall()
+            if mode:
+                rows = c.execute(
+                    "SELECT * FROM trades WHERE mode=? ORDER BY ts DESC LIMIT ?",
+                    (mode, limit),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM trades ORDER BY ts DESC LIMIT ?", (limit,)
+                ).fetchall()
             return [dict(r) for r in rows]
     except Exception:
         return []
 
 
-def get_db_stats() -> dict:
-    """Summary counts from the trades table."""
+def get_db_stats(mode: str | None = None) -> dict:
+    """Summary counts from the trades table, optionally filtered by mode."""
     try:
         with _conn() as c:
-            total    = c.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-            dry      = c.execute("SELECT COUNT(*) FROM trades WHERE status='dry_run'").fetchone()[0]
+            where = "WHERE mode=?" if mode else ""
+            params = (mode,) if mode else ()
+
+            total = c.execute(
+                f"SELECT COUNT(*) FROM trades {where}", params
+            ).fetchone()[0]
+
+            dry_where = "WHERE mode=? AND status='dry_run'" if mode else "WHERE status='dry_run'"
+            dry_params = (mode,) if mode else ()
+            dry = c.execute(
+                f"SELECT COUNT(*) FROM trades {dry_where}", dry_params
+            ).fetchone()[0]
+
             executed = total - dry
-            by_strategy = {}
+
+            strat_where = "WHERE mode=?" if mode else ""
             rows = c.execute(
-                "SELECT strategy, COUNT(*) as cnt FROM trades GROUP BY strategy"
+                f"SELECT strategy, COUNT(*) as cnt FROM trades {strat_where} GROUP BY strategy",
+                params,
             ).fetchall()
-            for r in rows:
-                by_strategy[r["strategy"] or "unknown"] = r["cnt"]
-            return {"total": total, "executed": executed, "dry_run": dry, "by_strategy": by_strategy}
+            by_strategy = {r["strategy"] or "unknown": r["cnt"] for r in rows}
+
+            return {
+                "total": total,
+                "executed": executed,
+                "dry_run": dry,
+                "by_strategy": by_strategy,
+                "mode": mode or "all",
+            }
     except Exception:
-        return {"total": 0, "executed": 0, "dry_run": 0, "by_strategy": {}}
+        return {"total": 0, "executed": 0, "dry_run": 0, "by_strategy": {}, "mode": mode or "all"}
 
 
 # ── Opportunities ─────────────────────────────────────────────────────────────
 
-def insert_opportunity(strategy: str, market: str, edge: float, executed: bool) -> None:
+def insert_opportunity(
+    strategy: str,
+    market: str,
+    edge: float,
+    executed: bool,
+    mode: str = "paper",
+) -> None:
     try:
         with _conn() as c:
             c.execute(
-                """INSERT INTO opportunities (ts, timestamp, strategy, market, edge, executed)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO opportunities (ts, timestamp, strategy, market, edge, executed, mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     time.time(),
                     time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
@@ -142,6 +195,7 @@ def insert_opportunity(strategy: str, market: str, edge: float, executed: bool) 
                     market[:100],
                     edge,
                     1 if executed else 0,
+                    mode,
                 ),
             )
             c.commit()
@@ -149,12 +203,18 @@ def insert_opportunity(strategy: str, market: str, edge: float, executed: bool) 
         _db_log.warning("db.insert_opportunity failed: %s", _e)
 
 
-def get_opportunities(limit: int = 100) -> list[dict]:
+def get_opportunities(limit: int = 100, mode: str | None = None) -> list[dict]:
     try:
         with _conn() as c:
-            rows = c.execute(
-                "SELECT * FROM opportunities ORDER BY ts DESC LIMIT ?", (limit,)
-            ).fetchall()
+            if mode:
+                rows = c.execute(
+                    "SELECT * FROM opportunities WHERE mode=? ORDER BY ts DESC LIMIT ?",
+                    (mode, limit),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM opportunities ORDER BY ts DESC LIMIT ?", (limit,)
+                ).fetchall()
             return [dict(r) for r in rows]
     except Exception:
         return []
@@ -167,59 +227,73 @@ def upsert_daily_pnl(
     near_resolved: float = 0.0,
     correlation: float = 0.0,
     sniper: float = 0.0,
+    mode: str = "paper",
 ) -> None:
-    """Insert or update today's per-strategy P&L snapshot."""
+    """Insert or update today's per-strategy P&L snapshot for the given mode.
+
+    Paper and live rows are stored separately — same date, different `mode`.
+    """
     import datetime
     today = datetime.date.today().isoformat()
     total = mispricing + near_resolved + correlation + sniper
     try:
         with _conn() as c:
             existing = c.execute(
-                "SELECT id FROM daily_pnl WHERE date=?", (today,)
+                "SELECT id FROM daily_pnl WHERE date=? AND mode=?", (today, mode)
             ).fetchone()
             if existing:
                 c.execute(
                     """UPDATE daily_pnl SET
                        ts=?, mispricing_pnl=?, near_resolved_pnl=?,
                        correlation_pnl=?, sniper_pnl=?, total_pnl=?
-                       WHERE date=?""",
-                    (time.time(), mispricing, near_resolved, correlation, sniper, total, today),
+                       WHERE date=? AND mode=?""",
+                    (time.time(), mispricing, near_resolved, correlation, sniper, total, today, mode),
                 )
             else:
                 c.execute(
                     """INSERT INTO daily_pnl
-                       (ts, date, mispricing_pnl, near_resolved_pnl, correlation_pnl, sniper_pnl, total_pnl)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (time.time(), today, mispricing, near_resolved, correlation, sniper, total),
+                       (ts, date, mode, mispricing_pnl, near_resolved_pnl,
+                        correlation_pnl, sniper_pnl, total_pnl)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (time.time(), today, mode, mispricing, near_resolved, correlation, sniper, total),
                 )
             c.commit()
     except Exception as _e:
         _db_log.warning("db.upsert_daily_pnl failed: %s", _e)
 
 
-def get_daily_pnl_history(days: int = 30) -> list[dict]:
+def get_daily_pnl_history(days: int = 30, mode: str | None = None) -> list[dict]:
     try:
         with _conn() as c:
-            rows = c.execute(
-                "SELECT * FROM daily_pnl ORDER BY ts DESC LIMIT ?", (days,)
-            ).fetchall()
+            if mode:
+                rows = c.execute(
+                    "SELECT * FROM daily_pnl WHERE mode=? ORDER BY ts DESC LIMIT ?",
+                    (mode, days),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM daily_pnl ORDER BY ts DESC LIMIT ?", (days,)
+                ).fetchall()
             return [dict(r) for r in reversed(rows)]
     except Exception:
         return []
 
 
-def get_strategy_pnl_totals() -> dict:
-    """Return cumulative P&L per strategy from daily_pnl table."""
+def get_strategy_pnl_totals(mode: str | None = None) -> dict:
+    """Return cumulative P&L per strategy, optionally restricted to one mode."""
     try:
         with _conn() as c:
-            row = c.execute("""
-                SELECT
+            where = "WHERE mode=?" if mode else ""
+            params = (mode,) if mode else ()
+            row = c.execute(
+                f"""SELECT
                     SUM(mispricing_pnl)    as mispricing,
                     SUM(near_resolved_pnl) as near_resolved,
                     SUM(correlation_pnl)   as correlation,
                     SUM(sniper_pnl)        as sniper
-                FROM daily_pnl
-            """).fetchone()
+                FROM daily_pnl {where}""",
+                params,
+            ).fetchone()
             return {
                 "mispricing":    round(float(row["mispricing"]    or 0), 4),
                 "near_resolved": round(float(row["near_resolved"] or 0), 4),
