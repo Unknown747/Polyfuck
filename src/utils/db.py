@@ -86,7 +86,7 @@ def insert_trade(
     trade,
     category: str = "",
     strategy: str = "",
-    mode: str = "paper",
+    mode: str = "live",
 ) -> None:
     """Persist a Trade dataclass record tagged with `mode`."""
     try:
@@ -119,7 +119,7 @@ def insert_trade(
 
 
 def get_trades(limit: int = 50, mode: str | None = None) -> list[dict]:
-    """Return the most recent trades. Pass `mode` to restrict to paper or live."""
+    """Return the most recent trades, optionally filtered by mode."""
     try:
         with _conn() as c:
             if mode:
@@ -147,14 +147,6 @@ def get_db_stats(mode: str | None = None) -> dict:
                 f"SELECT COUNT(*) FROM trades {where}", params
             ).fetchone()[0]
 
-            dry_where = "WHERE mode=? AND status='dry_run'" if mode else "WHERE status='dry_run'"
-            dry_params = (mode,) if mode else ()
-            dry = c.execute(
-                f"SELECT COUNT(*) FROM trades {dry_where}", dry_params
-            ).fetchone()[0]
-
-            executed = total - dry
-
             strat_where = "WHERE mode=?" if mode else ""
             rows = c.execute(
                 f"SELECT strategy, COUNT(*) as cnt FROM trades {strat_where} GROUP BY strategy",
@@ -164,13 +156,12 @@ def get_db_stats(mode: str | None = None) -> dict:
 
             return {
                 "total": total,
-                "executed": executed,
-                "dry_run": dry,
+                "executed": total,
                 "by_strategy": by_strategy,
                 "mode": mode or "all",
             }
     except Exception:
-        return {"total": 0, "executed": 0, "dry_run": 0, "by_strategy": {}, "mode": mode or "all"}
+        return {"total": 0, "executed": 0, "by_strategy": {}, "mode": mode or "all"}
 
 
 # ── Opportunities ─────────────────────────────────────────────────────────────
@@ -180,7 +171,7 @@ def insert_opportunity(
     market: str,
     edge: float,
     executed: bool,
-    mode: str = "paper",
+    mode: str = "live",
 ) -> None:
     try:
         with _conn() as c:
@@ -226,12 +217,9 @@ def upsert_daily_pnl(
     near_resolved: float = 0.0,
     correlation: float = 0.0,
     sniper: float = 0.0,
-    mode: str = "paper",
+    mode: str = "live",
 ) -> None:
-    """Insert or update today's per-strategy P&L snapshot for the given mode.
-
-    Paper and live rows are stored separately — same date, different `mode`.
-    """
+    """Insert or update today's per-strategy P&L snapshot."""
     import datetime
     today = datetime.date.today().isoformat()
     total = mispricing + near_resolved + correlation + sniper

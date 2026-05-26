@@ -28,4 +28,4 @@ if __name__ == "__main__":
     print("2. Add POLY_PRIVATE_KEY = <your full private key>")
     print("3. Delete config/keys/wallet.json (never commit private keys)")
     print("4. Fund your wallet with USDC.e on Polygon")
-    print("5. Test with: python -m src.bot --dry-run")
+    print("5. Start the bot: python -m src.bot")

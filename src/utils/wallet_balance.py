@@ -152,13 +152,13 @@ def print_wallet_status(address: str) -> None:
             console.print(
                 f"\n[yellow]⚠️  You have {usdc_native:.2f} native USDC but "
                 f"Polymarket uses USDC.e (bridged).[/]\n"
-                "Swap via: [cyan]python -m src.utils.swap_usdc --dry-run[/]"
+                "Swap via: [cyan]python -m src.utils.swap_usdc[/]"
             )
 
         if usdc_e > 0 and pusd == 0:
             console.print(
                 f"\n[yellow]⚠️  You have {usdc_e:.2f} USDC.e not yet deposited into Polymarket.[/]\n"
-                "Deposit via: [cyan]python -m src.utils.deposit --dry-run[/]"
+                "Deposit via: [cyan]python -m src.utils.deposit[/]"
             )
 
     except Exception as e:

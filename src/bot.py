@@ -449,7 +449,7 @@ _stats: dict = {
     "opp_stats":       {"total_logged": 0, "executed": 0, "avg_edge_pct": 0.0},
     "category_stats":  {},
     "wallet_balance":  0.0,
-    "db_stats":        {"total": 0, "executed": 0, "dry_run": 0, "by_strategy": {}},
+    "db_stats":        {"total": 0, "executed": 0, "by_strategy": {}},
     "strategy_stats":  {
         "mispricing":    {"opps": 0, "trades": 0, "pnl": 0.0},
         "near_resolved": {"opps": 0, "trades": 0, "pnl": 0.0},
@@ -513,13 +513,11 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   .cmp-header{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;margin-bottom:6px}
   .cmp-header span{text-align:center;font-size:.72rem;font-weight:700;letter-spacing:.06em;padding:4px 0;border-radius:6px}
   .cmp-header span:first-child{text-align:left;color:#8b949e}
-  .cmp-paper-h{color:#58a6ff;background:rgba(88,166,255,.08)}
   .cmp-live-h{color:#2ecc71;background:rgba(46,204,113,.08)}
-  .cmp-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;padding:6px 0;border-bottom:1px solid #21262d;align-items:center}
+  .cmp-row{display:grid;grid-template-columns:2fr 1fr;gap:0;padding:6px 0;border-bottom:1px solid #21262d;align-items:center}
   .cmp-row:last-child{border-bottom:none;font-weight:700;font-size:.84rem}
   .cmp-row span{text-align:center;font-size:.80rem}
   .cmp-row span:first-child{text-align:left;color:#8b949e;font-size:.76rem}
-  .cmp-paper{color:#58a6ff}
   .cmp-live{color:#2ecc71}
   .cmp-chart-wrap{margin-top:14px}
   .cmp-canvas{max-height:160px}
@@ -637,20 +635,19 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   </table>
 </div>
 
-<!-- Paper vs Live Comparison -->
+<!-- Live Strategy Performance -->
 <div class="section">
-  <h3>&#x1F4CA; Paper vs Live &mdash; Performance Comparison</h3>
-  <div class="cmp-header">
+  <h3>&#x26A1; Live Strategy Performance</h3>
+  <div class="cmp-header" style="grid-template-columns:2fr 1fr">
     <span>Strategy</span>
-    <span class="cmp-paper-h">&#x1F4DD; PAPER</span>
-    <span class="cmp-live-h">&#x26A1; LIVE</span>
+    <span class="cmp-live-h">&#x26A1; LIVE P&amp;L</span>
   </div>
-  <div class="cmp-row"><span>Total Trades (DB)</span><span class="cmp-paper" id="cmp-t-paper">&ndash;</span><span class="cmp-live" id="cmp-t-live">&ndash;</span></div>
-  <div class="cmp-row"><span>Mispricing P&amp;L</span><span class="cmp-paper" id="cmp-m-paper">&ndash;</span><span class="cmp-live" id="cmp-m-live">&ndash;</span></div>
-  <div class="cmp-row"><span>Near-Resolved P&amp;L</span><span class="cmp-paper" id="cmp-nr-paper">&ndash;</span><span class="cmp-live" id="cmp-nr-live">&ndash;</span></div>
-  <div class="cmp-row"><span>Correlated Arb P&amp;L</span><span class="cmp-paper" id="cmp-c-paper">&ndash;</span><span class="cmp-live" id="cmp-c-live">&ndash;</span></div>
-  <div class="cmp-row"><span>Sniper P&amp;L</span><span class="cmp-paper" id="cmp-s-paper">&ndash;</span><span class="cmp-live" id="cmp-s-live">&ndash;</span></div>
-  <div class="cmp-row"><span>&#x1F4B0; Total P&amp;L</span><span class="cmp-paper" id="cmp-total-paper">&ndash;</span><span class="cmp-live" id="cmp-total-live">&ndash;</span></div>
+  <div class="cmp-row"><span>Total Trades (DB)</span><span class="cmp-live" id="cmp-t-live">&ndash;</span></div>
+  <div class="cmp-row"><span>Mispricing P&amp;L</span><span class="cmp-live" id="cmp-m-live">&ndash;</span></div>
+  <div class="cmp-row"><span>Near-Resolved P&amp;L</span><span class="cmp-live" id="cmp-nr-live">&ndash;</span></div>
+  <div class="cmp-row"><span>Correlated Arb P&amp;L</span><span class="cmp-live" id="cmp-c-live">&ndash;</span></div>
+  <div class="cmp-row"><span>Sniper P&amp;L</span><span class="cmp-live" id="cmp-s-live">&ndash;</span></div>
+  <div class="cmp-row"><span>&#x1F4B0; Total P&amp;L</span><span class="cmp-live" id="cmp-total-live">&ndash;</span></div>
   <div class="cmp-chart-wrap">
     <canvas id="cmpChart" class="cmp-canvas"></canvas>
   </div>
@@ -723,17 +720,17 @@ async function fetchStats(){
     document.getElementById('lastScan').textContent=s.last_scan||'–';
     document.getElementById('tradeSize').textContent='$'+parseFloat(s.trade_size_usd||0).toFixed(2);
     const mb=document.getElementById('modeBadge');
-    mb.textContent=s.mode||'DRY RUN';
-    mb.style.background=s.mode==='LIVE'?'#e74c3c22':'#f39c1222';
-    mb.style.color=s.mode==='LIVE'?'#e74c3c':'#f39c12';
+    mb.textContent='⚡ LIVE';
+    mb.style.background='#2ecc7122';
+    mb.style.color='#2ecc71';
 
     // Balance row
     const bal=parseFloat(s.wallet_balance||0);
     const exp=parseFloat(s.exposure||0);
-    const avail=s.mode==='LIVE'?Math.max(0,bal-exp):null;
-    document.getElementById('b-wallet').textContent=s.mode==='DRY RUN'?'DRY RUN':'$'+bal.toFixed(2);
+    const avail=Math.max(0,bal-exp);
+    document.getElementById('b-wallet').textContent='$'+bal.toFixed(2);
     document.getElementById('b-exp-val').textContent='$'+exp.toFixed(2);
-    document.getElementById('b-avail').textContent=s.mode==='DRY RUN'?'DRY RUN':(avail!==null?'$'+avail.toFixed(2):'N/A');
+    document.getElementById('b-avail').textContent='$'+avail.toFixed(2);
     document.getElementById('b-red').textContent='$'+parseFloat(s.redeemed||0).toFixed(2);
 
     // Global summary
@@ -887,41 +884,31 @@ function fmtPnl(v){
 async function fetchCompare(){
   try{
     const d=await fetch('/api/compare').then(r=>r.json());
-    const p=d.paper||{};const l=d.live||{};
-    const pp=p.strategy_pnl||{};const lp=l.strategy_pnl||{};
-    const pd=p.db_stats||{};const ld=l.db_stats||{};
+    const lp=d.strategy_pnl||{};
+    const ld=d.db_stats||{};
 
-    // Table rows
-    document.getElementById('cmp-t-paper').textContent=pd.total||0;
     document.getElementById('cmp-t-live').textContent=ld.total||0;
 
     const rows=[
-      ['cmp-m',  pp.mispricing,    lp.mispricing],
-      ['cmp-nr', pp.near_resolved, lp.near_resolved],
-      ['cmp-c',  pp.correlated,    lp.correlated],
-      ['cmp-s',  pp.sniper,        lp.sniper],
+      ['cmp-m',  lp.mispricing],
+      ['cmp-nr', lp.near_resolved],
+      ['cmp-c',  lp.correlated],
+      ['cmp-s',  lp.sniper],
     ];
-    rows.forEach(([pre,pv,lv])=>{
-      const pe=document.getElementById(pre+'-paper');
+    rows.forEach(([pre,lv])=>{
       const le=document.getElementById(pre+'-live');
-      pe.textContent=fmtPnl(pv);
-      pe.style.color=parseFloat(pv||0)>=0?'#58a6ff':'#e74c3c';
       le.textContent=fmtPnl(lv);
       le.style.color=parseFloat(lv||0)>=0?'#2ecc71':'#e74c3c';
     });
 
-    const pTotal=(pp.mispricing||0)+(pp.near_resolved||0)+(pp.correlated||0)+(pp.sniper||0);
     const lTotal=(lp.mispricing||0)+(lp.near_resolved||0)+(lp.correlated||0)+(lp.sniper||0);
-    const ptEl=document.getElementById('cmp-total-paper');
     const ltEl=document.getElementById('cmp-total-live');
-    ptEl.textContent=fmtPnl(pTotal);
-    ptEl.style.color=pTotal>=0?'#58a6ff':'#e74c3c';
     ltEl.textContent=fmtPnl(lTotal);
     ltEl.style.color=lTotal>=0?'#2ecc71':'#e74c3c';
 
-    // Chart
-    cmpChart.data.datasets[0].data=[pp.mispricing||0,pp.near_resolved||0,pp.correlated||0,pp.sniper||0];
-    cmpChart.data.datasets[1].data=[lp.mispricing||0,lp.near_resolved||0,lp.correlated||0,lp.sniper||0];
+    // Chart — single live dataset
+    cmpChart.data.datasets[0].data=[lp.mispricing||0,lp.near_resolved||0,lp.correlated||0,lp.sniper||0];
+    if(cmpChart.data.datasets[1])cmpChart.data.datasets.splice(1,1);
     cmpChart.update('none');
   }catch(e){}
 }
@@ -975,7 +962,7 @@ def _start_health_server() -> None:
             elif self.path.startswith("/api/balance"):
                 self._send_json({
                     "balance": _stats.get("wallet_balance", 0.0),
-                    "mode":    _stats.get("mode", "DRY RUN"),
+                    "mode":    "LIVE",
                 })
 
             elif self.path.startswith("/api/trades"):
@@ -983,14 +970,8 @@ def _start_health_server() -> None:
 
             elif self.path.startswith("/api/compare"):
                 self._send_json({
-                    "paper": {
-                        "db_stats":     trade_db.get_db_stats(mode="paper"),
-                        "strategy_pnl": trade_db.get_strategy_pnl_totals(mode="paper"),
-                    },
-                    "live": {
-                        "db_stats":     trade_db.get_db_stats(mode="live"),
-                        "strategy_pnl": trade_db.get_strategy_pnl_totals(mode="live"),
-                    },
+                    "db_stats":     trade_db.get_db_stats(mode="live"),
+                    "strategy_pnl": trade_db.get_strategy_pnl_totals(mode="live"),
                 })
 
             elif self.path.startswith("/api/errors"):

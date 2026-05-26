@@ -158,4 +158,4 @@ if __name__ == "__main__":
     print("Next steps:")
     print("1. Add POLY_PRIVATE_KEY to Replit Secrets (Tools → Secrets)")
     print("2. Fund your wallet with USDC on Polygon")
-    print("3. Run in dry-run mode first: python -m src.bot --dry-run")
+    print("3. Fund your wallet with USDC on Polygon, then start the bot")

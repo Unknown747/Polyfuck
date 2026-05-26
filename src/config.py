@@ -9,8 +9,8 @@ class Config:
     # === Wallet ===
     PRIVATE_KEY: str = os.getenv("POLY_PRIVATE_KEY", "")
 
-    # === Trading mode ===
-    DRY_RUN: bool = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
+    # === Trading mode — always live ===
+    DRY_RUN: bool = False
 
     # === Capital & position sizing ===
     MAX_POSITION_USD: float = float(os.getenv("MAX_POSITION_USD", "5"))
@@ -150,7 +150,6 @@ class Config:
     @classmethod
     def summary(cls) -> dict:
         return {
-            "dry_run":              cls.DRY_RUN,
             "default_trade_size":   cls.DEFAULT_TRADE_SIZE_USD,
             "max_position_usd":     cls.MAX_POSITION_USD,
             "max_exposure":         cls.MAX_TOTAL_EXPOSURE_USD,

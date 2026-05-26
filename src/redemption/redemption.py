@@ -72,14 +72,14 @@ class RedemptionResult:
     outcome:        str
     shares:         float
     estimated_usdc: float
-    status:         str     # "success" | "dry_run" | "failed" | "skipped"
+    status:         str     # "success" | "failed" | "skipped"
     tx_hash:        str = ""
     error:          str = ""
     timestamp: float = field(default_factory=time.time)
 
     @property
     def succeeded(self) -> bool:
-        return self.status in ("success", "dry_run")
+        return self.status == "success"
 
 
 class AutoRedeemer:
@@ -363,7 +363,6 @@ class AutoRedeemer:
         for r in results:
             status_fmt = {
                 "success": "[bold green]✅ success[/]",
-                "dry_run": "[yellow]🔍 dry run[/]",
                 "failed":  "[red]❌ failed[/]",
                 "skipped": "[dim]⏭ skipped[/]",
             }.get(r.status, r.status)

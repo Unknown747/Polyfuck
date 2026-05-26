@@ -23,7 +23,7 @@ class Trade:
     price: float
     size: float      # Shares for SELL, dollar amount for BUY
     order_type: str  # "GTC", "FOK", "GTD"
-    status: str      # "pending", "filled", "partial", "cancelled", "dry_run"
+    status: str      # "pending", "filled", "partial", "cancelled"
     order_id: str = ""
     # BUG FIX: was `timestamp: float = time.time()` — that evaluates ONCE at class
     # definition time, giving every Trade the same timestamp. Use field() instead.
