@@ -1,7 +1,6 @@
 """SQLite persistence — trades, opportunities, and daily P&L snapshots.
 
-Every row is tagged with `mode` ('paper' or 'live') so paper-trading stats
-and live-trading stats are NEVER mixed together.
+Every row is tagged with `mode` ('live') so all stats reflect real trades.
 """
 
 import logging
@@ -42,7 +41,7 @@ def init_db() -> None:
                 fee_estimate REAL,
                 category     TEXT,
                 strategy     TEXT,
-                mode         TEXT    NOT NULL DEFAULT 'paper'
+                mode         TEXT    NOT NULL DEFAULT 'live'
             )
         """)
         c.execute("""
@@ -54,7 +53,7 @@ def init_db() -> None:
                 market    TEXT    NOT NULL,
                 edge      REAL,
                 executed  INTEGER DEFAULT 0,
-                mode      TEXT    NOT NULL DEFAULT 'paper'
+                mode      TEXT    NOT NULL DEFAULT 'live'
             )
         """)
         c.execute("""
@@ -62,7 +61,7 @@ def init_db() -> None:
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 ts                REAL    NOT NULL,
                 date              TEXT    NOT NULL,
-                mode              TEXT    NOT NULL DEFAULT 'paper',
+                mode              TEXT    NOT NULL DEFAULT 'live',
                 mispricing_pnl    REAL    DEFAULT 0,
                 near_resolved_pnl REAL    DEFAULT 0,
                 correlation_pnl   REAL    DEFAULT 0,
@@ -75,7 +74,7 @@ def init_db() -> None:
         for table in ("trades", "opportunities", "daily_pnl"):
             try:
                 c.execute(
-                    f"ALTER TABLE {table} ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'"
+                    f"ALTER TABLE {table} ADD COLUMN mode TEXT NOT NULL DEFAULT 'live'"
                 )
             except sqlite3.OperationalError:
                 pass  # Column already exists — safe to ignore

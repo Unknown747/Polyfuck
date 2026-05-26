@@ -184,15 +184,6 @@ class AutoRedeemer:
             result.error  = "missing condition_id — cannot call redeemPositions"
             return result
 
-        if config.DRY_RUN:
-            console.print(
-                f"  [yellow]DRY RUN[/] Would redeem {pos.size:.2f} shares "
-                f"({pos.outcome}) from [cyan]{pos.title[:50]}[/] "
-                f"≈ [green]${estimated_usdc:.2f} USDC[/]"
-            )
-            result.status = "dry_run"
-            return result
-
         if not self.private_key:
             result.status = "failed"
             result.error  = "POLY_PRIVATE_KEY not set in Replit Secrets"

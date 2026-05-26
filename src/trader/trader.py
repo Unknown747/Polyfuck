@@ -197,31 +197,6 @@ class Trader:
             f"Fees: ${profit_calc['total_fees']:.4f}"
         )
 
-        if config.DRY_RUN:
-            console.print(f"[yellow]DRY RUN: Would place trade on {opp.market_question}[/]")
-            trade = Trade(
-                market_question=opp.market_question,
-                condition_id=opp.condition_id,
-                token_id=opp.yes_token_id,
-                side="BUY",
-                price=opp.yes_price,
-                size=investment_usd,
-                order_type="GTC",
-                status="dry_run",
-                fee_estimate=profit_calc["total_fees"],
-            )
-            self._trade_log.append(trade)
-            self._daily_trades += 1
-            self._open_position_count += 1
-            self._total_exposure_usd += investment_usd
-            # In dry-run, record the ESTIMATED NET PROFIT (not cost) so the
-            # P&L chart trends positive and the daily-loss guard doesn't
-            # prematurely halt all dry-run trading after ~10 simulated trades.
-            self._daily_pnl += profit_calc["net_profit"]
-            self._persist_daily_pnl()
-            self.register_entry(opp.condition_id, opp.yes_price, investment_usd)
-            return trade
-
         if not self.clob._authenticated:
             console.print("[red]Not authenticated. Call authenticate() first.[/]")
             return None
@@ -303,28 +278,7 @@ class Trader:
 
     def close_position(self, token_id: str, size: float, condition_id: str) -> Trade | None:
         """Close a position by selling shares."""
-        # Recover original invested amount for exposure accounting.
         _, invested = self._position_entry.get(condition_id, (0.0, 0.0))
-
-        if config.DRY_RUN:
-            console.print(f"[yellow]DRY RUN: Would close position {token_id[:10]}...[/]")
-            trade = Trade(
-                market_question="Close position",
-                condition_id=condition_id,
-                token_id=token_id,
-                side="SELL",
-                price=0.0,
-                size=size,
-                order_type="GTC",
-                status="dry_run",
-            )
-            self._open_position_count = max(0, self._open_position_count - 1)
-            self._total_exposure_usd  = max(0.0, self._total_exposure_usd - invested)
-            # Credit back estimated proceeds so P&L stays meaningful in dry-run.
-            if invested > 0:
-                self._daily_pnl += invested
-            self._persist_daily_pnl()
-            return trade
 
         if not self.clob._authenticated:
             console.print("[red]Not authenticated.[/]")
@@ -384,34 +338,6 @@ class Trader:
             f"Est. Return: {actual_return_pct:.2f}% | "
             f"Closes in: {opp.hours_to_close:.0f}h"
         )
-
-        if config.DRY_RUN:
-            console.print(
-                f"[yellow]DRY RUN: Would buy {opp.winning_side} "
-                f"@ ${buy_price:.2f} in {opp.market_question[:50]}[/]"
-            )
-            trade = Trade(
-                market_question=opp.market_question,
-                condition_id=opp.condition_id,
-                token_id=opp.winning_token_id,
-                side="BUY",
-                price=buy_price,
-                size=investment_usd,
-                order_type="GTC",
-                status="dry_run",
-            )
-            self._trade_log.append(trade)
-            self._daily_trades += 1
-            self._open_position_count += 1
-            self._total_exposure_usd += investment_usd
-            # In dry-run, record ESTIMATED profit = investment × return_pct.
-            # Using actual profit keeps the P&L chart meaningful and prevents
-            # the daily-loss guard from halting dry-run after just ~10 trades.
-            estimated_profit = investment_usd * ((1.0 - buy_price) / max(buy_price, 0.01))
-            self._daily_pnl += estimated_profit
-            self._persist_daily_pnl()
-            self.register_entry(opp.condition_id, buy_price, investment_usd)
-            return trade
 
         if not self.clob._authenticated:
             console.print("[red]Not authenticated. Call authenticate() first.[/]")
@@ -564,9 +490,6 @@ class Trader:
 
     def cancel_all(self) -> bool:
         """Cancel all open orders."""
-        if config.DRY_RUN:
-            console.print("[yellow]DRY RUN: Would cancel all orders[/]")
-            return True
         try:
             self.clob.cancel_all_orders()
             console.print("[green]All orders cancelled.[/]")
@@ -772,8 +695,5 @@ class Trader:
                 f"max total exposure ${config.MAX_TOTAL_EXPOSURE_USD:.2f}[/]"
             )
             return False
-
-        if config.DRY_RUN:
-            console.print("[dim green]✓ Safety checks passed (DRY RUN)[/]")
 
         return True

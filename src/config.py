@@ -10,7 +10,7 @@ class Config:
     PRIVATE_KEY: str = os.getenv("POLY_PRIVATE_KEY", "")
 
     # === Trading mode ===
-    DRY_RUN: bool = os.getenv("DRY_RUN", "true").lower() in ("true", "1", "yes")
+    DRY_RUN: bool = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
 
     # === Capital & position sizing ===
     MAX_POSITION_USD: float = float(os.getenv("MAX_POSITION_USD", "5"))

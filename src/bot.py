@@ -73,8 +73,7 @@ logger.addHandler(_err_capture)
 class PolymarketBot:
     """Main bot controller — orchestrates scanning, trading, and redemption."""
 
-    def __init__(self, dry_run: bool | None = None):
-        self.dry_run = dry_run if dry_run is not None else config.DRY_RUN
+    def __init__(self):
         self.running = False
 
         # API clients
@@ -95,15 +94,14 @@ class PolymarketBot:
         self._total_redeemed_usd  = 0.0
         self._near_resolved_found = 0
 
-        # 'paper' or 'live' — used to filter DB reads so modes never mix
-        self._db_mode: str = "paper" if self.dry_run else "live"
+        self._db_mode: str = "live"
 
         # Initialise SQLite trade history and wallet balance cache
         trade_db.init_db()
         self._wallet_balance: float = 0.0
 
         # Strategy orchestrator (handles all 4 strategies)
-        self.orchestrator = Orchestrator(self.trader, self.gamma, self.clob, dry_run=self.dry_run)
+        self.orchestrator = Orchestrator(self.trader, self.gamma, self.clob)
 
         # Per-strategy cumulative counters (session-level)
         self._strategy_stats: dict = {
@@ -117,7 +115,7 @@ class PolymarketBot:
         """Start the bot."""
         console.print(Panel.fit(
             "[bold cyan]🔫 ClawBots Polymarket Bot[/]\n"
-            f"Mode: {'🔍 DRY RUN (no real trades)' if self.dry_run else '⚡ LIVE TRADING'}\n"
+            f"Mode: ⚡ LIVE TRADING\n"
             f"Capital Config: ${config.DEFAULT_TRADE_SIZE_USD:.0f} per trade "
             f"/ ${config.MAX_POSITION_USD:.0f} max position\n"
             f"Daily Loss Limit: ${config.MAX_DAILY_LOSS_USD:.0f} "
@@ -132,14 +130,12 @@ class PolymarketBot:
         ))
 
         errors = Config.validate()
-        if errors and not self.dry_run:
+        if errors:
             for err in errors:
                 console.print(f"[red]Config error: {err}[/]")
-            console.print("[yellow]Run with --dry-run to test without a wallet.[/]")
             sys.exit(1)
 
-        # Authenticate if not in dry-run mode
-        if not self.dry_run and config.PRIVATE_KEY:
+        if config.PRIVATE_KEY:
             self._authenticate()
 
         # Set up position tracker and redeemer
@@ -159,8 +155,7 @@ class PolymarketBot:
 
         self.running = True
         logger.info(
-            "Bot started in %s mode | trade_size=$%.2f max_pos=$%.2f",
-            "DRY RUN" if self.dry_run else "LIVE",
+            "Bot started in LIVE mode | trade_size=$%.2f max_pos=$%.2f",
             config.DEFAULT_TRADE_SIZE_USD,
             config.MAX_POSITION_USD,
         )
@@ -236,7 +231,7 @@ class PolymarketBot:
                 _stats["active_sniper_orders"] = len(orch_result.active_sniper_orders)
 
                 # 2. Check trailing stops + reconcile counters (live mode only)
-                if self.positions and not self.dry_run:
+                if self.positions:
                     current_positions = self.positions.refresh_positions()
                     if current_positions:
                         stopped = self.trader.check_trailing_stops(current_positions)
@@ -318,7 +313,7 @@ class PolymarketBot:
             f"${config.MAX_TOTAL_EXPOSURE_USD:.2f}\n"
             f"  Daily P&L: ${daily['daily_pnl']:+.2f} | "
             f"Redeemed: ${self._total_redeemed_usd:.2f} | "
-            f"Mode: {'DRY RUN' if self.dry_run else 'LIVE'}"
+            f"Mode: LIVE"
         )
 
         # Serialize trade log for dashboard (safe for JSON)
@@ -361,7 +356,7 @@ class PolymarketBot:
             "max_exposure":    config.MAX_TOTAL_EXPOSURE_USD,
             "daily_pnl":       daily["daily_pnl"],
             "redeemed":        self._total_redeemed_usd,
-            "mode":            "DRY RUN" if self.dry_run else "LIVE",
+            "mode":            "LIVE",
             "last_scan":       time.strftime("%H:%M:%S UTC", time.gmtime()),
             "trade_size_usd":  daily["current_trade_size"],
             "stops_triggered": daily["stops_triggered"],
@@ -377,8 +372,8 @@ class PolymarketBot:
         })
 
     def _fetch_wallet_balance(self) -> float:
-        """Return USDC wallet balance. Returns 0.0 in dry-run or if unavailable."""
-        if self.dry_run or not self.clob._authenticated:
+        """Return USDC wallet balance. Returns 0.0 if unavailable."""
+        if not self.clob._authenticated:
             return 0.0
         try:
             data = self.clob.get_balance_allowance("COLLATERAL")
@@ -402,7 +397,7 @@ class PolymarketBot:
         self.running = False
 
     def _shutdown(self) -> None:
-        if not self.dry_run and self.clob._authenticated:
+        if self.clob._authenticated:
             try:
                 self.trader.cancel_all()
             except Exception:
@@ -443,7 +438,7 @@ _stats: dict = {
     "max_exposure":    config.MAX_TOTAL_EXPOSURE_USD,
     "daily_pnl":       0.0,
     "redeemed":        0.0,
-    "mode":            "DRY RUN",
+    "mode":            "LIVE",
     "last_scan":       "–",
     "started":         time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
     "trade_size_usd":  config.DEFAULT_TRADE_SIZE_USD,
@@ -541,7 +536,7 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
 <div class="sub">
   <span>Started: <span id="started">&ndash;</span></span>
   <span>Last scan: <span id="lastScan">&ndash;</span></span>
-  <span id="modeBadge" class="badge" style="background:#f39c1222;color:#f39c12">DRY RUN</span>
+  <span id="modeBadge" class="badge" style="background:#2ecc7122;color:#2ecc71">⚡ LIVE</span>
   <span><span class="dot"></span><span id="tradeSize">&ndash;</span>/trade</span>
 </div>
 
@@ -984,8 +979,7 @@ def _start_health_server() -> None:
                 })
 
             elif self.path.startswith("/api/trades"):
-                _mode = "live" if _stats.get("mode") == "LIVE" else "paper"
-                self._send_json(trade_db.get_trades(50, mode=_mode))
+                self._send_json(trade_db.get_trades(50, mode="live"))
 
             elif self.path.startswith("/api/compare"):
                 self._send_json({
@@ -1030,10 +1024,8 @@ def main():
     _start_health_server()
 
     parser = argparse.ArgumentParser(description="ClawBots Polymarket Bot \U0001f52b\U0001f9ec")
-    parser.add_argument("--dry-run", action="store_true", default=True,
-                        help="Simulate trades without executing (default: True)")
     parser.add_argument("--live", action="store_true",
-                        help="Enable live trading with real money")
+                        help="(deprecated, always live)")
     parser.add_argument("--scan", action="store_true",
                         help="Run a single scan and exit")
     parser.add_argument("--positions", action="store_true",
@@ -1048,15 +1040,12 @@ def main():
     parser.add_argument("--days", type=int, default=7,
                         help="Number of days of history for backtest (default: 7)")
 
-    args    = parser.parse_args()
-    dry_run = not args.live
+    args = parser.parse_args()
 
-    if args.live:
-        console.print("[bold red]⚠️  LIVE TRADING MODE — REAL MONEY AT RISK ⚠️[/]")
-        if not config.is_configured():
-            for err in Config.validate():
-                console.print(f"[red]{err}[/]")
-            sys.exit(1)
+    if not config.is_configured():
+        for err in Config.validate():
+            console.print(f"[red]{err}[/]")
+        sys.exit(1)
 
     # Feature 4: Backtest mode
     if args.backtest:
@@ -1065,7 +1054,7 @@ def main():
         bt.run(verbose=True)
         return
 
-    bot = PolymarketBot(dry_run=dry_run)
+    bot = PolymarketBot()
 
     if args.scan:
         opportunities = bot.scan_once(min_edge=args.min_edge)

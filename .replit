@@ -23,12 +23,12 @@ args = "Start application"
 name = "Start application"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python -m src.bot --dry-run"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python -m src.bot"
 
 [deployment]
 deploymentTarget = "vm"
@@ -41,7 +41,7 @@ externalPort = 80
 [userenv]
 
 [userenv.shared]
-DRY_RUN = "true"
+DRY_RUN = "false"
 LOG_LEVEL = "INFO"
 LOG_FILE = "logs/bot.log"
 MAX_POSITION_USD = "3"

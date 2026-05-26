@@ -160,14 +160,12 @@ class OrderbookSniper:
         return self.place(self.scan(categories))
 
     def get_active_orders(self) -> list[SniperOrder]:
-        return [o for o in self._orders if o.status in ("pending", "dry_run") and not o.is_expired]
+        return [o for o in self._orders if o.status == "pending" and not o.is_expired]
 
     def _cancel_expired(self) -> None:
-        # Medium fix: expire both "pending" (live) and "dry_run" orders so _placed
-        # keys are cleared in long dry-run sessions and re-placement can occur.
         for order in self._orders:
-            if order.is_expired and order.status in ("pending", "dry_run"):
-                if order.status == "pending" and not config.DRY_RUN and order.order_id:
+            if order.is_expired and order.status == "pending":
+                if order.order_id:
                     try:
                         self.clob.cancel_order(order.order_id)
                     except Exception as e:
@@ -221,71 +219,55 @@ class OrderbookSniper:
                 size_pct=        alloc * 100,
             )
 
-            if config.DRY_RUN:
-                order.status   = "dry_run"
-                order.order_id = f"dry_{tier_num}_{condition_id[:8]}"
-                logger.info(
-                    "OrderbookSniper DRY: Tier %d @ $%.2f × $%.2f in %s",
-                    tier_num, price, size_usd, question[:40]
-                )
-                self._placed.add(dedup_key)
-            else:
-                try:
-                    if self.clob._authenticated:
-                        # HIGH FIX: check ALL global risk limits per-tier before each order:
-                        # open positions, prospective exposure, and daily loss so multiple
-                        # tiers cannot collectively breach any limit while counters unchanged.
+            try:
+                if self.clob._authenticated:
+                    if self._trader is not None:
+                        t = self._trader
+                        if (t._open_position_count >= config.MAX_OPEN_POSITIONS
+                                or t._total_exposure_usd + size_usd > config.MAX_TOTAL_EXPOSURE_USD
+                                or t._daily_pnl <= -config.MAX_DAILY_LOSS_USD):
+                            logger.debug(
+                                "OrderbookSniper: risk limit reached at tier %d — stopping",
+                                tier_num,
+                            )
+                            break
+
+                        trade = t._place_order(
+                            token_id=token_id,
+                            side="BUY",
+                            size=size_usd,
+                            price=price,
+                            condition_id=condition_id,
+                            order_type="GTC",
+                        )
+                    else:
+                        logger.warning(
+                            "OrderbookSniper: no shared Trader injected — "
+                            "skipping tier %d for %s to avoid bypassing risk limits",
+                            tier_num, condition_id[:12],
+                        )
+                        continue
+
+                    if trade:
+                        order.order_id = trade.order_id or ""
+                        order.status   = trade.status
+                        self._placed.add(dedup_key)
                         if self._trader is not None:
-                            t = self._trader
-                            if (t._open_position_count >= config.MAX_OPEN_POSITIONS
-                                    or t._total_exposure_usd + size_usd > config.MAX_TOTAL_EXPOSURE_USD
-                                    or t._daily_pnl <= -config.MAX_DAILY_LOSS_USD):
-                                logger.debug(
-                                    "OrderbookSniper: risk limit reached at tier %d — stopping",
-                                    tier_num,
-                                )
-                                break  # stop placing further tiers for this market
-
-                            trade = t._place_order(
-                                token_id=token_id,
-                                side="BUY",
-                                size=size_usd,
-                                price=price,
-                                condition_id=condition_id,
-                                order_type="GTC",
-                            )
-                        else:
-                            logger.warning(
-                                "OrderbookSniper: no shared Trader injected — "
-                                "skipping tier %d for %s to avoid bypassing risk limits",
-                                tier_num, condition_id[:12],
-                            )
-                            continue
-
-                        if trade:
-                            order.order_id = trade.order_id or ""
-                            order.status   = trade.status
-                            self._placed.add(dedup_key)
-                            # HIGH FIX: update and persist risk counters immediately so
-                            # subsequent tier/market checks see accurate exposure totals.
-                            if self._trader is not None:
-                                self._trader._daily_pnl        -= size_usd
-                                self._trader._open_position_count  += 1
-                                self._trader._total_exposure_usd   += size_usd
-                                self._trader._persist_daily_pnl()
-                                # Record to DB and register for trailing stop
-                                trade.strategy       = "sniper"
-                                trade.market_question = question
-                                _mode = "paper" if config.DRY_RUN else "live"
-                                try:
-                                    import src.utils.db as _sniper_db
-                                    _sniper_db.insert_trade(trade, "", "sniper", mode=_mode)
-                                except Exception:
-                                    pass
-                                self._trader.register_entry(condition_id, price, size_usd)
-                except Exception as e:
-                    logger.warning("OrderbookSniper: place failed tier %d: %s", tier_num, e)
-                    self._consecutive_failures += 1
+                            self._trader._daily_pnl -= size_usd
+                            self._trader._open_position_count += 1
+                            self._trader._total_exposure_usd += size_usd
+                            self._trader._persist_daily_pnl()
+                            trade.strategy = "sniper"
+                            trade.market_question = question
+                            try:
+                                import src.utils.db as _sniper_db
+                                _sniper_db.insert_trade(trade, "", "sniper", mode="live")
+                            except Exception:
+                                pass
+                            self._trader.register_entry(condition_id, price, size_usd)
+            except Exception as e:
+                logger.warning("OrderbookSniper: place failed tier %d: %s", tier_num, e)
+                self._consecutive_failures += 1
 
             self._orders.append(order)
             orders.append(order)

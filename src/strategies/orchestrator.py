@@ -97,7 +97,7 @@ class HealthMonitor:
 class Orchestrator:
     """Coordinates all 4 strategies with priority enforcement and safety guards."""
 
-    def __init__(self, trader: "Trader", gamma=None, clob=None, dry_run: bool | None = None):
+    def __init__(self, trader: "Trader", gamma=None, clob=None):
         from src.utils.api import GammaClient, ClobClient
         from src.scanner.mispricing import MispricingScanner
         from src.scanner.near_resolved import NearResolvedScanner
@@ -130,9 +130,7 @@ class Orchestrator:
         self._active_condition_ids: dict[str, float] = {}
         self._scan_count: int = 0
 
-        # 'paper' or 'live' — tags every DB row so stats never mix across modes
-        _is_dry = dry_run if dry_run is not None else config.DRY_RUN
-        self._mode: str = "paper" if _is_dry else "live"
+        self._mode: str = "live"
 
         # Cumulative per-strategy P&L (session-level)
         self._pnl: dict[str, float] = {
@@ -443,32 +441,8 @@ class Orchestrator:
             inv = config.DEFAULT_TRADE_SIZE_USD
             _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
 
-            if config.DRY_RUN:
-                logger.info(
-                    "CorrelatedArb DRY: buy %s @ $%.3f | sell %s @ $%.3f | div=%.1f%%",
-                    pair.market_a_question[:30], pair.buy_price,
-                    pair.market_b_question[:30], pair.sell_price,
-                    pair.divergence_pct,
-                )
-                out.corr_trades += 1
-                corr_active += 1
-                _expiry = time.time() + _cooldown
-                # HIGH FIX: store both the prefixed corr key (internal dedup) AND raw
-                # condition IDs so mispricing/near_resolved/sniper see the cooldown too.
-                self._active_condition_ids[corr_key] = _expiry
-                self._active_condition_ids[pair.buy_market_id]  = _expiry
-                self._active_condition_ids[pair.sell_market_id] = _expiry
-                pnl_delta = inv * (pair.divergence_pct / 100) * 0.5
-                self._pnl["correlated"] += pnl_delta
-                out.corr_pnl += pnl_delta
-                try:
-                    self.db.insert_opportunity(
-                        "correlated", pair.description[:100], pair.divergence_pct, True, mode=self._mode
-                    )
-                except Exception:
-                    pass
-            else:
-                # FIX #2: live correlated execution path
+            if True:
+                # live correlated execution path
                 # Strategy: BUY the underpriced leg (market_a), SELL the overpriced leg (market_b).
                 # Both orders are GTC maker orders (0% fee).
                 try:
@@ -590,53 +564,36 @@ class Orchestrator:
 
             size = getattr(sig, "size_usd", config.DEFAULT_TRADE_SIZE_USD)
 
-            if config.DRY_RUN:
-                logger.info(
-                    "Sniper DRY: %s %s @ $%.3f | $%.2f",
-                    sig.side, sig.market_question[:40], sig.entry_price, size
+            try:
+                trade = self.trader._place_order(
+                    token_id=sig.token_id,
+                    side="BUY",
+                    size=size,
+                    price=sig.entry_price,
+                    condition_id=sig.condition_id,
+                    order_type="GTC",
                 )
-                pnl_delta = size * 0.02
-                out.sniper_pnl += pnl_delta
-                self._pnl["sniper"] += pnl_delta
-                _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
-                self._active_condition_ids[sig.condition_id] = time.time() + _cooldown
-                try:
-                    self.db.insert_opportunity(
-                        "sniper", sig.market_question, 0.0, True, mode=self._mode
-                    )
-                except Exception:
-                    pass
-            else:
-                try:
-                    trade = self.trader._place_order(
-                        token_id=sig.token_id,
-                        side="BUY",
-                        size=size,
-                        price=sig.entry_price,
-                        condition_id=sig.condition_id,
-                        order_type="GTC",
-                    )
-                    if trade:
-                        trade.strategy = "sniper"
-                        out.sniper_pnl += size * 0.02
-                        self._pnl["sniper"] += size * 0.02
-                        out.trades_this_run.append(trade)
-                        self.trader._daily_pnl -= size
-                        self.trader._open_position_count += 1
-                        self.trader._total_exposure_usd += size
-                        self.trader._persist_daily_pnl()
-                        self.trader.register_entry(sig.condition_id, sig.entry_price, size)
-                        _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
-                        self._active_condition_ids[sig.condition_id] = time.time() + _cooldown
-                        try:
-                            self.db.insert_trade(trade, "", "sniper", mode=self._mode)
-                            self.db.insert_opportunity(
-                                "sniper", sig.market_question, 0.0, True, mode=self._mode
-                            )
-                        except Exception:
-                            pass
-                except Exception as exc:
-                    logger.warning("Sniper live execution error: %s", exc)
+                if trade:
+                    trade.strategy = "sniper"
+                    out.sniper_pnl += size * 0.02
+                    self._pnl["sniper"] += size * 0.02
+                    out.trades_this_run.append(trade)
+                    self.trader._daily_pnl -= size
+                    self.trader._open_position_count += 1
+                    self.trader._total_exposure_usd += size
+                    self.trader._persist_daily_pnl()
+                    self.trader.register_entry(sig.condition_id, sig.entry_price, size)
+                    _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
+                    self._active_condition_ids[sig.condition_id] = time.time() + _cooldown
+                    try:
+                        self.db.insert_trade(trade, "", "sniper", mode=self._mode)
+                        self.db.insert_opportunity(
+                            "sniper", sig.market_question, 0.0, True, mode=self._mode
+                        )
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.warning("Sniper live execution error: %s", exc)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
