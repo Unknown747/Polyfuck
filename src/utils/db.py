@@ -14,6 +14,8 @@ def _conn() -> sqlite3.Connection:
     _DB_PATH.parent.mkdir(exist_ok=True)
     conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 

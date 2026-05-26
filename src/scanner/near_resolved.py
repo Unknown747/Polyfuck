@@ -154,7 +154,10 @@ class NearResolvedScanner:
             return None
 
         hours_to_close = self._hours_to_close(market)
-        if hours_to_close < 0:
+        # Allow markets up to 4 hours past their close time — they are likely
+        # resolving imminently and the overdue flag triggers an alert. Markets
+        # further past close are stale and should be ignored.
+        if hours_to_close < -4.0:
             return None
         if hours_to_close != float("inf") and hours_to_close > max_hours:
             return None

@@ -255,15 +255,12 @@ class OrderbookSniper:
                                 order_type="GTC",
                             )
                         else:
-                            from src.trader.trader import Trader
-                            trade = Trader(self.clob)._place_order(
-                                token_id=token_id,
-                                side="BUY",
-                                size=size_usd,
-                                price=price,
-                                condition_id=condition_id,
-                                order_type="GTC",
+                            logger.warning(
+                                "OrderbookSniper: no shared Trader injected — "
+                                "skipping tier %d for %s to avoid bypassing risk limits",
+                                tier_num, condition_id[:12],
                             )
+                            continue
 
                         if trade:
                             order.order_id = trade.order_id or ""

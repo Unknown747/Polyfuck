@@ -594,6 +594,34 @@ class Orchestrator:
                     )
                 except Exception:
                     pass
+            else:
+                try:
+                    trade = self.trader._place_order(
+                        token_id=sig.token_id,
+                        side="BUY",
+                        size=size,
+                        price=sig.entry_price,
+                        condition_id=sig.condition_id,
+                        order_type="GTC",
+                    )
+                    if trade:
+                        trade.strategy = "sniper"
+                        out.sniper_pnl += size * 0.02
+                        self._pnl["sniper"] += size * 0.02
+                        self.trader._daily_pnl -= size
+                        self.trader._open_position_count += 1
+                        self.trader._total_exposure_usd += size
+                        self.trader._persist_daily_pnl()
+                        _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
+                        self._active_condition_ids[sig.condition_id] = time.time() + _cooldown
+                        try:
+                            self.db.insert_opportunity(
+                                "sniper", sig.market_question, 0.0, True
+                            )
+                        except Exception:
+                            pass
+                except Exception as exc:
+                    logger.warning("Sniper live execution error: %s", exc)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

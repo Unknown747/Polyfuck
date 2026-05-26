@@ -569,7 +569,7 @@ class Trader:
             "daily_trades":       self._daily_trades,
             "open_positions":     self._open_position_count,
             "total_exposure_usd": self._total_exposure_usd,
-            "trade_log":          self._trade_log,
+            "trade_log":          list(self._trade_log),
             "stops_triggered":    self._stops_triggered,
             "current_trade_size": self._current_trade_size,
         }
@@ -654,9 +654,9 @@ class Trader:
             )
             return False
 
-        if self._daily_pnl < -config.MAX_DAILY_LOSS_USD:
+        if self._daily_pnl <= -config.MAX_DAILY_LOSS_USD:
             console.print(
-                f"[red]Daily loss ${abs(self._daily_pnl):.2f} > "
+                f"[red]Daily loss ${abs(self._daily_pnl):.2f} >= "
                 f"limit ${config.MAX_DAILY_LOSS_USD:.2f} — trading halted[/]"
             )
             return False
