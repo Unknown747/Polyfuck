@@ -63,7 +63,6 @@ def init_db() -> None:
                 total_pnl         REAL    DEFAULT 0
             )
         """)
-        c.commit()
 
 
 # ── Trades ────────────────────────────────────────────────────────────────────

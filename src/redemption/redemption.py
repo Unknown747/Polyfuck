@@ -339,7 +339,8 @@ class AutoRedeemer:
         """
         try:
             from web3 import Web3 as _Web3
-            base_fee = w3.eth.gas_price
+            block    = w3.eth.get_block("pending")
+            base_fee = block.get("baseFeePerGas") or w3.eth.gas_price
             return {
                 "maxFeePerGas":        int(base_fee * 1.3),
                 "maxPriorityFeePerGas": _Web3.to_wei(30, "gwei"),

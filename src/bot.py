@@ -435,7 +435,7 @@ _stats: dict = {
     "near_resolved":   0,
     "trades":          0,
     "open_positions":  0,
-    "max_positions":   config.MAX_CONCURRENT_POSITIONS,
+    "max_positions":   config.MAX_OPEN_POSITIONS,
     "exposure":        0.0,
     "max_exposure":    config.MAX_TOTAL_EXPOSURE_USD,
     "daily_pnl":       0.0,

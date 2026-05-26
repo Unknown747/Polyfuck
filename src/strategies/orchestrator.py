@@ -203,7 +203,7 @@ class Orchestrator:
         self._place_sniper(results, errors)
         self._apply_sniper(results, errors, result)
 
-        result.total_trades = result.mispricing_trades + result.nr_trades + result.corr_trades
+        result.total_trades = len(result.trades_this_run)
         result.errors       = list(errors.values())
         result.active_pairs = self.corr_scanner.get_active_pairs()
         result.active_sniper_orders = self.sniper.get_active_orders()
@@ -655,4 +655,4 @@ class Orchestrator:
     def _sized_investment(self, multiplier: float) -> float:
         base = self.trader._current_trade_size
         sized = round(base * multiplier, 2)
-        return min(sized, config.MAX_POSITION_USD)
+        return max(config.MIN_TRADE_SIZE_USD, min(sized, config.MAX_POSITION_USD))
