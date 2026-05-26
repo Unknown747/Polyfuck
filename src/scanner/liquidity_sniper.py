@@ -232,9 +232,21 @@ class OrderbookSniper:
             else:
                 try:
                     if self.clob._authenticated:
-                        # FIX #6c: reuse shared trader if available; otherwise use clob directly
+                        # HIGH FIX: check ALL global risk limits per-tier before each order:
+                        # open positions, prospective exposure, and daily loss so multiple
+                        # tiers cannot collectively breach any limit while counters unchanged.
                         if self._trader is not None:
-                            trade = self._trader._place_order(
+                            t = self._trader
+                            if (t._open_position_count >= config.MAX_OPEN_POSITIONS
+                                    or t._total_exposure_usd + size_usd > config.MAX_TOTAL_EXPOSURE_USD
+                                    or t._daily_pnl <= -config.MAX_DAILY_LOSS_USD):
+                                logger.debug(
+                                    "OrderbookSniper: risk limit reached at tier %d — stopping",
+                                    tier_num,
+                                )
+                                break  # stop placing further tiers for this market
+
+                            trade = t._place_order(
                                 token_id=token_id,
                                 side="BUY",
                                 size=size_usd,
@@ -252,10 +264,18 @@ class OrderbookSniper:
                                 condition_id=condition_id,
                                 order_type="GTC",
                             )
+
                         if trade:
                             order.order_id = trade.order_id or ""
                             order.status   = trade.status
                             self._placed.add(dedup_key)
+                            # HIGH FIX: update and persist risk counters immediately so
+                            # subsequent tier/market checks see accurate exposure totals.
+                            if self._trader is not None:
+                                self._trader._daily_pnl        -= size_usd
+                                self._trader._open_position_count  += 1
+                                self._trader._total_exposure_usd   += size_usd
+                                self._trader._persist_daily_pnl()
                 except Exception as e:
                     logger.warning("OrderbookSniper: place failed tier %d: %s", tier_num, e)
                     self._consecutive_failures += 1

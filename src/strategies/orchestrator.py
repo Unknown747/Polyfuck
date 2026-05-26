@@ -303,9 +303,16 @@ class Orchestrator:
         Called sequentially after _apply_mispricing/_apply_near_resolved/
         _apply_correlated so _active_condition_ids is fully up-to-date and
         OrderbookSniper._can_place gives accurate same-cycle cross-strategy dedup.
+
+        HIGH FIX: checks global risk limits before placing any orders so
+        orderbook sniper cannot bypass MAX_CONCURRENT_POSITIONS / MAX_TOTAL_EXPOSURE.
         """
         sniper_scan = results.get("sniper")
         if not sniper_scan:
+            return
+        # Enforce global risk gate before allowing any sniper order placement
+        if not self._within_global_limits():
+            logger.debug("Orchestrator: sniper placement skipped — global risk limits reached")
             return
         try:
             self.sniper.place_orders(sniper_scan)
@@ -440,7 +447,12 @@ class Orchestrator:
                 )
                 out.corr_trades += 1
                 corr_active += 1
-                self._active_condition_ids[corr_key] = time.time() + _cooldown
+                _expiry = time.time() + _cooldown
+                # HIGH FIX: store both the prefixed corr key (internal dedup) AND raw
+                # condition IDs so mispricing/near_resolved/sniper see the cooldown too.
+                self._active_condition_ids[corr_key] = _expiry
+                self._active_condition_ids[pair.buy_market_id]  = _expiry
+                self._active_condition_ids[pair.sell_market_id] = _expiry
                 pnl_delta = inv * (pair.divergence_pct / 100) * 0.5
                 self._pnl["correlated"] += pnl_delta
                 out.corr_pnl += pnl_delta
@@ -455,6 +467,17 @@ class Orchestrator:
                 # Strategy: BUY the underpriced leg (market_a), SELL the overpriced leg (market_b).
                 # Both orders are GTC maker orders (0% fee).
                 try:
+                    # HIGH FIX: prospective risk check before committing capital so
+                    # correlated path cannot overshoot MAX_OPEN_POSITIONS or MAX_TOTAL_EXPOSURE.
+                    if (self.trader._open_position_count >= config.MAX_OPEN_POSITIONS
+                            or self.trader._total_exposure_usd + inv > config.MAX_TOTAL_EXPOSURE_USD
+                            or self.trader._daily_pnl <= -config.MAX_DAILY_LOSS_USD):
+                        logger.debug(
+                            "CorrelatedArb: prospective risk check failed — skipping pair %s",
+                            pair.buy_market_id[:12],
+                        )
+                        continue
+
                     buy_trade = self.trader._place_order(
                         token_id=pair.buy_token_id,
                         side="BUY",
@@ -498,7 +521,12 @@ class Orchestrator:
                     )
                     out.corr_trades += 1
                     corr_active += 1
-                    self._active_condition_ids[corr_key] = time.time() + _cooldown
+                    _expiry = time.time() + _cooldown
+                    # HIGH FIX: store prefixed corr key (internal dedup) AND raw
+                    # condition IDs so mispricing/near_resolved/sniper see cooldown.
+                    self._active_condition_ids[corr_key] = _expiry
+                    self._active_condition_ids[pair.buy_market_id]  = _expiry
+                    self._active_condition_ids[pair.sell_market_id] = _expiry
                     # Debit capital at entry; credit back on redemption.
                     # Mutate ALL counters first, then persist atomically.
                     self.trader._daily_pnl -= inv
@@ -574,14 +602,22 @@ class Orchestrator:
         expiry = self._active_condition_ids.get(condition_id)
         return expiry is None or time.time() > expiry
 
-    def _within_global_limits(self) -> bool:
-        """Check against MAX_CONCURRENT_POSITIONS and MAX_TOTAL_EXPOSURE_USD."""
+    def _within_global_limits(self, prospective_usd: float = 0.0) -> bool:
+        """Check open positions, total exposure, and daily loss against limits.
+
+        Uses the same constants as Trader._check_safety_limits so both
+        enforcement paths are consistent. Accepts an optional prospective
+        investment size for forward-looking exposure checks.
+        """
         daily = self.trader.get_daily_summary()
-        if daily["open_positions"] >= config.MAX_CONCURRENT_POSITIONS:
-            logger.debug("Orchestrator: max concurrent positions reached")
+        if daily["open_positions"] >= config.MAX_OPEN_POSITIONS:
+            logger.debug("Orchestrator: max open positions reached")
             return False
-        if daily["total_exposure_usd"] >= config.MAX_TOTAL_EXPOSURE_USD:
+        if daily["total_exposure_usd"] + prospective_usd > config.MAX_TOTAL_EXPOSURE_USD:
             logger.debug("Orchestrator: max total exposure reached")
+            return False
+        if daily["daily_pnl"] <= -config.MAX_DAILY_LOSS_USD:
+            logger.debug("Orchestrator: daily loss limit reached")
             return False
         return True
 
