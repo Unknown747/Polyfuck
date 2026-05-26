@@ -515,6 +515,19 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   .g{color:#2ecc71}.r{color:#e74c3c}.b{color:#58a6ff}.y{color:#f39c12}
   .footer{color:#8b949e;font-size:.74rem;text-align:center;margin-top:10px}
   canvas{max-height:200px}
+  .cmp-header{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;margin-bottom:6px}
+  .cmp-header span{text-align:center;font-size:.72rem;font-weight:700;letter-spacing:.06em;padding:4px 0;border-radius:6px}
+  .cmp-header span:first-child{text-align:left;color:#8b949e}
+  .cmp-paper-h{color:#58a6ff;background:rgba(88,166,255,.08)}
+  .cmp-live-h{color:#2ecc71;background:rgba(46,204,113,.08)}
+  .cmp-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;padding:6px 0;border-bottom:1px solid #21262d;align-items:center}
+  .cmp-row:last-child{border-bottom:none;font-weight:700;font-size:.84rem}
+  .cmp-row span{text-align:center;font-size:.80rem}
+  .cmp-row span:first-child{text-align:left;color:#8b949e;font-size:.76rem}
+  .cmp-paper{color:#58a6ff}
+  .cmp-live{color:#2ecc71}
+  .cmp-chart-wrap{margin-top:14px}
+  .cmp-canvas{max-height:160px}
   .bal-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px}
   .bal-card{background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:10px;text-align:center}
   .bal-card .bl{font-size:.65rem;color:#8b949e;text-transform:uppercase;letter-spacing:.06em}
@@ -627,6 +640,25 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     <thead><tr><th>Category</th><th>Opps</th><th>Taker Fee</th><th>Min Edge</th></tr></thead>
     <tbody id="catBody"><tr><td colspan="4" style="color:#8b949e;text-align:center">No data yet</td></tr></tbody>
   </table>
+</div>
+
+<!-- Paper vs Live Comparison -->
+<div class="section">
+  <h3>&#x1F4CA; Paper vs Live &mdash; Performance Comparison</h3>
+  <div class="cmp-header">
+    <span>Strategy</span>
+    <span class="cmp-paper-h">&#x1F4DD; PAPER</span>
+    <span class="cmp-live-h">&#x26A1; LIVE</span>
+  </div>
+  <div class="cmp-row"><span>Total Trades (DB)</span><span class="cmp-paper" id="cmp-t-paper">&ndash;</span><span class="cmp-live" id="cmp-t-live">&ndash;</span></div>
+  <div class="cmp-row"><span>Mispricing P&amp;L</span><span class="cmp-paper" id="cmp-m-paper">&ndash;</span><span class="cmp-live" id="cmp-m-live">&ndash;</span></div>
+  <div class="cmp-row"><span>Near-Resolved P&amp;L</span><span class="cmp-paper" id="cmp-nr-paper">&ndash;</span><span class="cmp-live" id="cmp-nr-live">&ndash;</span></div>
+  <div class="cmp-row"><span>Correlated Arb P&amp;L</span><span class="cmp-paper" id="cmp-c-paper">&ndash;</span><span class="cmp-live" id="cmp-c-live">&ndash;</span></div>
+  <div class="cmp-row"><span>Sniper P&amp;L</span><span class="cmp-paper" id="cmp-s-paper">&ndash;</span><span class="cmp-live" id="cmp-s-live">&ndash;</span></div>
+  <div class="cmp-row"><span>&#x1F4B0; Total P&amp;L</span><span class="cmp-paper" id="cmp-total-paper">&ndash;</span><span class="cmp-live" id="cmp-total-live">&ndash;</span></div>
+  <div class="cmp-chart-wrap">
+    <canvas id="cmpChart" class="cmp-canvas"></canvas>
+  </div>
 </div>
 
 <!-- Error panel (hidden when empty) -->
@@ -827,10 +859,84 @@ async function fetchErrors(){
   }catch(e){}
 }
 
+// Paper vs Live comparison chart
+const cmpCtx=document.getElementById('cmpChart').getContext('2d');
+const cmpChart=new Chart(cmpCtx,{
+  type:'bar',
+  data:{
+    labels:['Mispricing','Near-Resolved','Correlated','Sniper'],
+    datasets:[
+      {label:'Paper',data:[0,0,0,0],
+       backgroundColor:'rgba(88,166,255,0.55)',borderColor:'#58a6ff',borderWidth:1,borderRadius:4},
+      {label:'Live', data:[0,0,0,0],
+       backgroundColor:'rgba(46,204,113,0.55)',borderColor:'#2ecc71',borderWidth:1,borderRadius:4},
+    ]
+  },
+  options:{responsive:true,animation:false,
+    plugins:{
+      legend:{display:true,labels:{color:'#8b949e',font:{size:11}}},
+      tooltip:{callbacks:{label:c=>'$'+parseFloat(c.raw).toFixed(4)}}
+    },
+    scales:{
+      y:{ticks:{color:'#8b949e',callback:v=>'$'+v.toFixed(2)},grid:{color:'#21262d'}},
+      x:{ticks:{color:'#8b949e'},grid:{display:false}}
+    }
+  }
+});
+
+function fmtPnl(v){
+  const n=parseFloat(v||0);
+  return (n>=0?'+':'')+'\$'+n.toFixed(4);
+}
+
+async function fetchCompare(){
+  try{
+    const d=await fetch('/api/compare').then(r=>r.json());
+    const p=d.paper||{};const l=d.live||{};
+    const pp=p.strategy_pnl||{};const lp=l.strategy_pnl||{};
+    const pd=p.db_stats||{};const ld=l.db_stats||{};
+
+    // Table rows
+    document.getElementById('cmp-t-paper').textContent=pd.total||0;
+    document.getElementById('cmp-t-live').textContent=ld.total||0;
+
+    const rows=[
+      ['cmp-m',  pp.mispricing,    lp.mispricing],
+      ['cmp-nr', pp.near_resolved, lp.near_resolved],
+      ['cmp-c',  pp.correlated,    lp.correlated],
+      ['cmp-s',  pp.sniper,        lp.sniper],
+    ];
+    rows.forEach(([pre,pv,lv])=>{
+      const pe=document.getElementById(pre+'-paper');
+      const le=document.getElementById(pre+'-live');
+      pe.textContent=fmtPnl(pv);
+      pe.style.color=parseFloat(pv||0)>=0?'#58a6ff':'#e74c3c';
+      le.textContent=fmtPnl(lv);
+      le.style.color=parseFloat(lv||0)>=0?'#2ecc71':'#e74c3c';
+    });
+
+    const pTotal=(pp.mispricing||0)+(pp.near_resolved||0)+(pp.correlated||0)+(pp.sniper||0);
+    const lTotal=(lp.mispricing||0)+(lp.near_resolved||0)+(lp.correlated||0)+(lp.sniper||0);
+    const ptEl=document.getElementById('cmp-total-paper');
+    const ltEl=document.getElementById('cmp-total-live');
+    ptEl.textContent=fmtPnl(pTotal);
+    ptEl.style.color=pTotal>=0?'#58a6ff':'#e74c3c';
+    ltEl.textContent=fmtPnl(lTotal);
+    ltEl.style.color=lTotal>=0?'#2ecc71':'#e74c3c';
+
+    // Chart
+    cmpChart.data.datasets[0].data=[pp.mispricing||0,pp.near_resolved||0,pp.correlated||0,pp.sniper||0];
+    cmpChart.data.datasets[1].data=[lp.mispricing||0,lp.near_resolved||0,lp.correlated||0,lp.sniper||0];
+    cmpChart.update('none');
+  }catch(e){}
+}
+
 setInterval(fetchStats,5000);
 setInterval(fetchErrors,10000);
+setInterval(fetchCompare,15000);
 fetchStats();
 fetchErrors();
+fetchCompare();
 </script>
 </body>
 </html>"""
@@ -880,6 +986,18 @@ def _start_health_server() -> None:
             elif self.path.startswith("/api/trades"):
                 _mode = "live" if _stats.get("mode") == "LIVE" else "paper"
                 self._send_json(trade_db.get_trades(50, mode=_mode))
+
+            elif self.path.startswith("/api/compare"):
+                self._send_json({
+                    "paper": {
+                        "db_stats":     trade_db.get_db_stats(mode="paper"),
+                        "strategy_pnl": trade_db.get_strategy_pnl_totals(mode="paper"),
+                    },
+                    "live": {
+                        "db_stats":     trade_db.get_db_stats(mode="live"),
+                        "strategy_pnl": trade_db.get_strategy_pnl_totals(mode="live"),
+                    },
+                })
 
             elif self.path.startswith("/api/errors"):
                 self._send_json(list(_error_log))
