@@ -303,9 +303,12 @@ class Trader:
 
     def close_position(self, token_id: str, size: float, condition_id: str) -> Trade | None:
         """Close a position by selling shares."""
+        # Recover original invested amount for exposure accounting.
+        _, invested = self._position_entry.get(condition_id, (0.0, 0.0))
+
         if config.DRY_RUN:
             console.print(f"[yellow]DRY RUN: Would close position {token_id[:10]}...[/]")
-            return Trade(
+            trade = Trade(
                 market_question="Close position",
                 condition_id=condition_id,
                 token_id=token_id,
@@ -315,6 +318,13 @@ class Trader:
                 order_type="GTC",
                 status="dry_run",
             )
+            self._open_position_count = max(0, self._open_position_count - 1)
+            self._total_exposure_usd  = max(0.0, self._total_exposure_usd - invested)
+            # Credit back estimated proceeds so P&L stays meaningful in dry-run.
+            if invested > 0:
+                self._daily_pnl += invested
+            self._persist_daily_pnl()
+            return trade
 
         if not self.clob._authenticated:
             console.print("[red]Not authenticated.[/]")
@@ -331,6 +341,11 @@ class Trader:
             )
             if result:
                 self._open_position_count = max(0, self._open_position_count - 1)
+                self._total_exposure_usd  = max(0.0, self._total_exposure_usd - invested)
+                # Credit back the investment; realised gain/loss is reconciled at redemption.
+                if invested > 0:
+                    self._daily_pnl += invested
+                self._persist_daily_pnl()
             return result
         except Exception as e:
             console.print(f"[red]Close position failed: {e}[/]")

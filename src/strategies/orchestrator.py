@@ -608,13 +608,16 @@ class Orchestrator:
                         trade.strategy = "sniper"
                         out.sniper_pnl += size * 0.02
                         self._pnl["sniper"] += size * 0.02
+                        out.trades_this_run.append(trade)
                         self.trader._daily_pnl -= size
                         self.trader._open_position_count += 1
                         self.trader._total_exposure_usd += size
                         self.trader._persist_daily_pnl()
+                        self.trader.register_entry(sig.condition_id, sig.entry_price, size)
                         _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
                         self._active_condition_ids[sig.condition_id] = time.time() + _cooldown
                         try:
+                            self.db.insert_trade(trade, "", "sniper")
                             self.db.insert_opportunity(
                                 "sniper", sig.market_question, 0.0, True
                             )
