@@ -547,6 +547,13 @@ class Orchestrator:
                         )
                     except Exception:
                         pass
+                    try:
+                        buy_trade.strategy = "correlated"
+                        buy_trade.market_question = pair.market_a_question
+                        self.db.insert_trade(buy_trade, "", "correlated", mode=self._mode)
+                        self.trader.register_entry(pair.buy_market_id, pair.buy_price, inv)
+                    except Exception:
+                        pass
                 except Exception as exc:
                     logger.warning("CorrelatedArb: execution error: %s", exc)
 

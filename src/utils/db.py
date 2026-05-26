@@ -297,8 +297,8 @@ def get_strategy_pnl_totals(mode: str | None = None) -> dict:
             return {
                 "mispricing":    round(float(row["mispricing"]    or 0), 4),
                 "near_resolved": round(float(row["near_resolved"] or 0), 4),
-                "correlation":   round(float(row["correlation"]   or 0), 4),
+                "correlated":    round(float(row["correlation"]   or 0), 4),
                 "sniper":        round(float(row["sniper"]        or 0), 4),
             }
     except Exception:
-        return {"mispricing": 0.0, "near_resolved": 0.0, "correlation": 0.0, "sniper": 0.0}
+        return {"mispricing": 0.0, "near_resolved": 0.0, "correlated": 0.0, "sniper": 0.0}

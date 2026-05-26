@@ -273,6 +273,16 @@ class OrderbookSniper:
                                 self._trader._open_position_count  += 1
                                 self._trader._total_exposure_usd   += size_usd
                                 self._trader._persist_daily_pnl()
+                                # Record to DB and register for trailing stop
+                                trade.strategy       = "sniper"
+                                trade.market_question = question
+                                _mode = "paper" if config.DRY_RUN else "live"
+                                try:
+                                    import src.utils.db as _sniper_db
+                                    _sniper_db.insert_trade(trade, "", "sniper", mode=_mode)
+                                except Exception:
+                                    pass
+                                self._trader.register_entry(condition_id, price, size_usd)
                 except Exception as e:
                     logger.warning("OrderbookSniper: place failed tier %d: %s", tier_num, e)
                     self._consecutive_failures += 1
