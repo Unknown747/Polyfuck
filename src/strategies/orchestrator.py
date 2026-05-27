@@ -441,95 +441,93 @@ class Orchestrator:
             inv = config.DEFAULT_TRADE_SIZE_USD
             _cooldown = config.POSITION_COOLDOWN_MINUTES * 60
 
-            if True:
-                # live correlated execution path
-                # Strategy: BUY the underpriced leg (market_a), SELL the overpriced leg (market_b).
-                # Both orders are GTC maker orders (0% fee).
+            # Strategy: BUY the underpriced leg (market_a), SELL the overpriced leg (market_b).
+            # Both orders are GTC maker orders (0% fee).
+            try:
+                # HIGH FIX: prospective risk check before committing capital so
+                # correlated path cannot overshoot MAX_OPEN_POSITIONS or MAX_TOTAL_EXPOSURE.
+                if (self.trader._open_position_count >= config.MAX_OPEN_POSITIONS
+                        or self.trader._total_exposure_usd + inv > config.MAX_TOTAL_EXPOSURE_USD
+                        or self.trader._daily_pnl <= -config.MAX_DAILY_LOSS_USD):
+                    logger.debug(
+                        "CorrelatedArb: prospective risk check failed — skipping pair %s",
+                        pair.buy_market_id[:12],
+                    )
+                    continue
+
+                buy_trade = self.trader._place_order(
+                    token_id=pair.buy_token_id,
+                    side="BUY",
+                    size=inv,
+                    price=pair.buy_price,
+                    condition_id=pair.buy_market_id,
+                    order_type="GTC",
+                )
+                if not buy_trade:
+                    logger.warning("CorrelatedArb: BUY leg failed for %s", pair.buy_market_id[:12])
+                    continue
+
+                sell_trade = self.trader._place_order(
+                    token_id=pair.sell_token_id,
+                    side="SELL",
+                    size=inv,
+                    price=pair.sell_price,
+                    condition_id=pair.sell_market_id,
+                    order_type="GTC",
+                )
+                if not sell_trade:
+                    # Cancel the BUY leg to avoid unhedged directional exposure
+                    if buy_trade.order_id:
+                        try:
+                            self.clob.cancel_order(buy_trade.order_id)
+                            logger.warning(
+                                "CorrelatedArb: SELL leg failed — cancelled BUY %s",
+                                buy_trade.order_id,
+                            )
+                        except Exception as ce:
+                            logger.error(
+                                "CorrelatedArb: SELL leg failed AND cancel failed: %s", ce
+                            )
+                    continue
+
+                logger.info(
+                    "CorrelatedArb LIVE: buy %s @ $%.3f | sell %s @ $%.3f | div=%.1f%%",
+                    pair.market_a_question[:30], pair.buy_price,
+                    pair.market_b_question[:30], pair.sell_price,
+                    pair.divergence_pct,
+                )
+                out.corr_trades += 1
+                corr_active += 1
+                _expiry = time.time() + _cooldown
+                # HIGH FIX: store prefixed corr key (internal dedup) AND raw
+                # condition IDs so mispricing/near_resolved/sniper see cooldown.
+                self._active_condition_ids[corr_key] = _expiry
+                self._active_condition_ids[pair.buy_market_id]  = _expiry
+                self._active_condition_ids[pair.sell_market_id] = _expiry
+                # Debit capital at entry; credit back on redemption.
+                # Mutate ALL counters first, then persist atomically.
+                self.trader._daily_pnl -= inv
+                self.trader._open_position_count += 1
+                self.trader._total_exposure_usd += inv
+                self.trader._persist_daily_pnl()
+                pnl_delta = inv * (pair.divergence_pct / 100) * 0.5
+                self._pnl["correlated"] += pnl_delta
+                out.corr_pnl += pnl_delta
                 try:
-                    # HIGH FIX: prospective risk check before committing capital so
-                    # correlated path cannot overshoot MAX_OPEN_POSITIONS or MAX_TOTAL_EXPOSURE.
-                    if (self.trader._open_position_count >= config.MAX_OPEN_POSITIONS
-                            or self.trader._total_exposure_usd + inv > config.MAX_TOTAL_EXPOSURE_USD
-                            or self.trader._daily_pnl <= -config.MAX_DAILY_LOSS_USD):
-                        logger.debug(
-                            "CorrelatedArb: prospective risk check failed — skipping pair %s",
-                            pair.buy_market_id[:12],
-                        )
-                        continue
-
-                    buy_trade = self.trader._place_order(
-                        token_id=pair.buy_token_id,
-                        side="BUY",
-                        size=inv,
-                        price=pair.buy_price,
-                        condition_id=pair.buy_market_id,
-                        order_type="GTC",
+                    self.db.insert_opportunity(
+                        "correlated", pair.description[:100], pair.divergence_pct, True, mode=self._mode
                     )
-                    if not buy_trade:
-                        logger.warning("CorrelatedArb: BUY leg failed for %s", pair.buy_market_id[:12])
-                        continue
-
-                    sell_trade = self.trader._place_order(
-                        token_id=pair.sell_token_id,
-                        side="SELL",
-                        size=inv,
-                        price=pair.sell_price,
-                        condition_id=pair.sell_market_id,
-                        order_type="GTC",
-                    )
-                    if not sell_trade:
-                        # Cancel the BUY leg to avoid unhedged directional exposure
-                        if buy_trade.order_id:
-                            try:
-                                self.clob.cancel_order(buy_trade.order_id)
-                                logger.warning(
-                                    "CorrelatedArb: SELL leg failed — cancelled BUY %s",
-                                    buy_trade.order_id,
-                                )
-                            except Exception as ce:
-                                logger.error(
-                                    "CorrelatedArb: SELL leg failed AND cancel failed: %s", ce
-                                )
-                        continue
-
-                    logger.info(
-                        "CorrelatedArb LIVE: buy %s @ $%.3f | sell %s @ $%.3f | div=%.1f%%",
-                        pair.market_a_question[:30], pair.buy_price,
-                        pair.market_b_question[:30], pair.sell_price,
-                        pair.divergence_pct,
-                    )
-                    out.corr_trades += 1
-                    corr_active += 1
-                    _expiry = time.time() + _cooldown
-                    # HIGH FIX: store prefixed corr key (internal dedup) AND raw
-                    # condition IDs so mispricing/near_resolved/sniper see cooldown.
-                    self._active_condition_ids[corr_key] = _expiry
-                    self._active_condition_ids[pair.buy_market_id]  = _expiry
-                    self._active_condition_ids[pair.sell_market_id] = _expiry
-                    # Debit capital at entry; credit back on redemption.
-                    # Mutate ALL counters first, then persist atomically.
-                    self.trader._daily_pnl -= inv
-                    self.trader._open_position_count += 1
-                    self.trader._total_exposure_usd += inv
-                    self.trader._persist_daily_pnl()
-                    pnl_delta = inv * (pair.divergence_pct / 100) * 0.5
-                    self._pnl["correlated"] += pnl_delta
-                    out.corr_pnl += pnl_delta
-                    try:
-                        self.db.insert_opportunity(
-                            "correlated", pair.description[:100], pair.divergence_pct, True, mode=self._mode
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        buy_trade.strategy = "correlated"
-                        buy_trade.market_question = pair.market_a_question
-                        self.db.insert_trade(buy_trade, "", "correlated", mode=self._mode)
-                        self.trader.register_entry(pair.buy_market_id, pair.buy_price, inv)
-                    except Exception:
-                        pass
-                except Exception as exc:
-                    logger.warning("CorrelatedArb: execution error: %s", exc)
+                except Exception:
+                    pass
+                try:
+                    buy_trade.strategy = "correlated"
+                    buy_trade.market_question = pair.market_a_question
+                    self.db.insert_trade(buy_trade, "", "correlated", mode=self._mode)
+                    self.trader.register_entry(pair.buy_market_id, pair.buy_price, inv)
+                except Exception:
+                    pass
+            except Exception as exc:
+                logger.warning("CorrelatedArb: execution error: %s", exc)
 
     def _apply_sniper(
         self, results: dict, errors: dict, out: StrategyResult
