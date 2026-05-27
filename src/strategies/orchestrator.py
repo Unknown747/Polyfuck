@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from src.config import config
+import src.utils.opportunity_logger as _opp_log
 
 if TYPE_CHECKING:
     from src.utils.api import GammaClient, ClobClient
@@ -365,6 +366,10 @@ class Orchestrator:
                     self.db.insert_opportunity("mispricing", opp.market_question, opp.edge_pct, False, mode=self._mode)
                 except Exception as e:
                     logger.debug("DB write failed (mispricing opp): %s", e)
+            try:
+                _opp_log.log_mispricing(opp, executed=bool(trade), category=category)
+            except Exception as e:
+                logger.debug("opportunity_logger failed (mispricing): %s", e)
 
     def _apply_near_resolved(
         self, results: dict, errors: dict, out: StrategyResult
@@ -408,6 +413,10 @@ class Orchestrator:
                     self.db.insert_opportunity("near_resolved", opp.market_question, opp.return_pct, False, mode=self._mode)
                 except Exception as e:
                     logger.debug("DB write failed (near_resolved opp): %s", e)
+            try:
+                _opp_log.log_near_resolved(opp, executed=bool(trade))
+            except Exception as e:
+                logger.debug("opportunity_logger failed (near_resolved): %s", e)
 
     def _apply_correlated(
         self, results: dict, errors: dict, out: StrategyResult

@@ -2,7 +2,10 @@
 
 import time
 import json
+import datetime
+import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from rich.console import Console
 
@@ -68,9 +71,8 @@ class Trader:
 
     def _load_daily_state(self) -> dict:
         """Load today's risk state from disk. Returns empty dict if stale or missing."""
-        import json, datetime
         try:
-            path = __import__("pathlib").Path(self._DAILY_STATE_FILE)
+            path = Path(self._DAILY_STATE_FILE)
             if not path.exists():
                 return {}
             data = json.loads(path.read_text())
@@ -90,9 +92,8 @@ class Trader:
 
     def _persist_daily_pnl(self) -> None:
         """Write today's full risk state to disk so restarts don't reset limits."""
-        import json, datetime
         try:
-            path = __import__("pathlib").Path(self._DAILY_STATE_FILE)
+            path = Path(self._DAILY_STATE_FILE)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps({
                 "date":              datetime.date.today().isoformat(),
