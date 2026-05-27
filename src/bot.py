@@ -291,7 +291,7 @@ class PolymarketBot:
             if total_redeemed > 0 and config.AUTO_COMPOUND:
                 try:
                     balance_data = self.clob.get_balance_allowance("COLLATERAL")
-                    usdc_balance = float(balance_data.get("balance", 0) or 0)
+                    usdc_balance = float(balance_data.get("balance", 0) or 0) / 1e6
                     new_size     = self.trader.auto_compound(usdc_balance)
                     _stats["trade_size_usd"] = new_size
                 except Exception as e:
@@ -374,12 +374,17 @@ class PolymarketBot:
         })
 
     def _fetch_wallet_balance(self) -> float:
-        """Return USDC wallet balance. Returns 0.0 if unavailable."""
+        """Return USDC wallet balance in dollars. Returns 0.0 if unavailable.
+
+        Note: get_balance_allowance returns balance in micro-USDC (6 decimals),
+        e.g. '10989647' means $10.989647 — must divide by 1e6.
+        """
         if not self.clob._authenticated:
             return 0.0
         try:
             data = self.clob.get_balance_allowance("COLLATERAL")
-            return float(data.get("balance", 0) or 0)
+            raw  = float(data.get("balance", 0) or 0)
+            return raw / 1e6  # convert micro-USDC → USDC dollars
         except Exception as e:
             logger.warning("Could not fetch wallet balance: %s", e)
             return 0.0

@@ -680,7 +680,7 @@ class Trader:
         """Verify USDC balance and MATIC gas before placing a live order."""
         try:
             balance_data = self.clob.get_balance_allowance("COLLATERAL")
-            usdc_balance = float(balance_data.get("balance", 0) or 0)
+            usdc_balance = float(balance_data.get("balance", 0) or 0) / 1e6  # micro-USDC → dollars
             if usdc_balance < investment_usd:
                 console.print(
                     f"[red]Insufficient USDC: have ${usdc_balance:.2f}, "

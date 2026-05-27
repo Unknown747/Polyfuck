@@ -312,10 +312,9 @@ if __name__ == "__main__":
     parser.add_argument("--balances", action="store_true", help="Show balances and exit")
     args = parser.parse_args()
 
-    if args.balances or (not args.unwrap and args.amount is None and not args.dry_run):
+    if args.balances:
         check_balances()
-        if not args.dry_run and args.amount is None and args.unwrap is None:
-            sys.exit(0)
+        sys.exit(0)
 
     if args.unwrap is not None:
         result = unwrap_pusd(args.unwrap, dry_run=args.dry_run)
