@@ -69,6 +69,9 @@ class Trader:
         self._stops_triggered: int = 0
         # Current trade size (may be updated by auto-compound)
         self._current_trade_size: float = config.DEFAULT_TRADE_SIZE_USD
+        # Wallet registration gate: set True when Polymarket returns
+        # "maker address not allowed" so we skip all orders until resolved.
+        self._maker_blocked: bool = False
 
     def _load_daily_state(self) -> dict:
         """Load today's risk state from disk. Returns empty dict if stale or missing."""
@@ -616,6 +619,12 @@ class Trader:
         import time as _time
         last_exc: Exception | None = None
 
+        # Hard gate: wallet not registered — don't even attempt the API call.
+        # This catches ALL order paths (mispricing, near_resolved, correlated,
+        # sniper) so no wasted retries once the error has been seen once.
+        if self._maker_blocked:
+            return None
+
         # Pre-fetch neg_risk so create_and_post_order doesn't have to look it up
         # internally (was failing with "required positional argument: 'neg_risk'").
         # Use PartialCreateOrderOptions (all fields Optional) — correct type for
@@ -682,6 +691,30 @@ class Trader:
             except Exception as e:
                 last_exc = e
                 err_str = str(e).lower()
+
+                # Hard permanent error — wallet not registered on Polymarket.
+                # No point retrying: every attempt will return 400.
+                # Set the maker-blocked flag so all subsequent orders are skipped
+                # until the user completes the Polymarket deposit wallet flow.
+                if "maker address not allowed" in err_str:
+                    if not self._maker_blocked:
+                        self._maker_blocked = True
+                        console.print(
+                            "\n[bold red]🚫 TRADING PAUSED — Wallet not registered on Polymarket[/]\n"
+                            "[yellow]Your wallet address needs to complete the deposit wallet flow:\n"
+                            "  1. Go to https://polymarket.com\n"
+                            f"  2. Connect wallet: {getattr(self.clob, 'address', 'unknown')}\n"
+                            "  3. Accept Terms of Service\n"
+                            "  4. Click Deposit and complete the on-chain setup\n"
+                            "  5. Restart the bot after completing the flow\n"
+                            "Bot will keep scanning for opportunities.[/]\n"
+                        )
+                        logger.error(
+                            "Trading halted: maker address not allowed. "
+                            "Complete the Polymarket deposit wallet flow at polymarket.com"
+                        )
+                    break  # Don't retry — it won't change
+
                 # Retry on transient rate-limit / server errors only
                 transient = any(code in err_str for code in ("429", "502", "503", "504", "timeout", "connection"))
                 if transient and attempt < _retries:
@@ -694,27 +727,40 @@ class Trader:
                     continue
                 break
 
-        console.print(f"[red]Order failed after {_retries} attempt(s): {last_exc}[/]")
+        if not (last_exc and "maker address not allowed" in str(last_exc).lower()):
+            console.print(f"[red]Order failed after {_retries} attempt(s): {last_exc}[/]")
         return None
 
     def _check_live_balance(self, investment_usd: float) -> bool:
-        """Verify USDC balance and MATIC gas before placing a live order."""
+        """Verify USDC balance before placing a live order.
+
+        BUG FIX: previously returned True on exception, allowing trades even
+        when the balance could not be verified. Now returns False (safe-fail)
+        so no order is placed when balance state is unknown.
+        """
         try:
             balance_data = self.clob.get_balance_allowance("COLLATERAL")
             usdc_balance = float(balance_data.get("balance", 0) or 0) / 1e6  # micro-USDC → dollars
             if usdc_balance < investment_usd:
                 console.print(
-                    f"[red]Insufficient USDC: have ${usdc_balance:.2f}, "
-                    f"need ${investment_usd:.2f}. Top up your wallet.[/]"
+                    f"[red]Insufficient USDC on Polymarket: have ${usdc_balance:.2f}, "
+                    f"need ${investment_usd:.2f}. "
+                    f"Deposit USDC at polymarket.com/deposit first.[/]"
                 )
                 return False
+            return True
         except Exception as e:
-            console.print(f"[yellow]⚠️  Could not verify USDC balance: {e} — proceeding with caution.[/]")
-
-        return True
+            console.print(
+                f"[red]⛔ Could not verify USDC balance: {e} — skipping trade (safe-fail).[/]"
+            )
+            return False
 
     def _check_safety_limits(self, investment_usd: float) -> bool:
         """Check if a new trade is within all safety limits."""
+        # Gate: wallet not yet registered on Polymarket — skip silently
+        if self._maker_blocked:
+            return False
+
         if investment_usd > config.MAX_POSITION_USD:
             console.print(
                 f"[red]Position ${investment_usd:.2f} > max ${config.MAX_POSITION_USD:.2f}[/]"

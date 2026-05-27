@@ -120,20 +120,16 @@ class ClobClient:
         self.api_passphrase = creds.api_passphrase
         self._authenticated = True
 
-        # Register our on-chain balance with the CLOB so it allows maker orders.
+        # Register our on-chain COLLATERAL balance with the CLOB.
         # Without this call, POST /order returns "maker address not allowed".
+        # NOTE: CONDITIONAL requires a specific token_id — skip the generic call
+        # because it always returns 400 and is pure noise in the logs.
         try:
             self._client.update_balance_allowance(
                 BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
             )
         except Exception:
-            pass  # non-fatal; order placement will fail fast if balance still unrecognised
-        try:
-            self._client.update_balance_allowance(
-                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL)
-            )
-        except Exception:
-            pass
+            pass  # non-fatal; order placement will fail fast if balance unrecognised
 
         return {
             "apiKey": creds.api_key,

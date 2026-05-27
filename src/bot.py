@@ -397,9 +397,32 @@ class PolymarketBot:
             console.print(f"[green]✅ Authenticated as {short[:10]}...{short[-6:]}[/]")
             # Start background on-chain wallet balance refresh loop
             _start_wallet_refresh_loop(self.clob.address)
+            # Warn immediately if Polymarket USDC balance is $0 — trades will
+            # fail with "maker address not allowed" until USDC is deposited.
+            self._check_polymarket_balance()
         except Exception as e:
             console.print(f"[red]Authentication failed: {e}[/]")
             sys.exit(1)
+
+    def _check_polymarket_balance(self) -> None:
+        """Check Polymarket USDC balance and warn if $0 (trades will fail)."""
+        try:
+            data = self.clob.get_balance_allowance("COLLATERAL")
+            raw  = float(data.get("balance", 0) or 0)
+            usdc = raw / 1e6
+            if usdc < config.DEFAULT_TRADE_SIZE_USD:
+                console.print(
+                    f"\n[bold red]⚠️  POLYMARKET USDC BALANCE: ${usdc:.2f}[/]\n"
+                    f"[yellow]Trades will fail until you deposit USDC into your Polymarket wallet.\n"
+                    f"  1. Go to https://polymarket.com\n"
+                    f"  2. Connect wallet: {self.clob.address}\n"
+                    f"  3. Click Deposit → transfer USDC to activate your trading account.\n"
+                    f"Bot will keep scanning but all orders will be skipped until funded.[/]\n"
+                )
+            else:
+                console.print(f"[green]💰 Polymarket USDC balance: ${usdc:.2f}[/]")
+        except Exception as e:
+            logger.warning("Could not check Polymarket balance at startup: %s", e)
 
     def _signal_handler(self, signum, frame) -> None:
         console.print(f"\n[yellow]Signal {signum} received, shutting down...[/]")
