@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import src.utils.db as trade_db
+from src.utils.wallet_balance import get_all_balances
 
 from rich.console import Console
 from rich.panel import Panel
@@ -389,6 +390,8 @@ class PolymarketBot:
             self.clob.authenticate(config.PRIVATE_KEY)
             short = self.clob.address
             console.print(f"[green]✅ Authenticated as {short[:10]}...{short[-6:]}[/]")
+            # Start background on-chain wallet balance refresh loop
+            _start_wallet_refresh_loop(self.clob.address)
         except Exception as e:
             console.print(f"[red]Authentication failed: {e}[/]")
             sys.exit(1)
@@ -470,6 +473,62 @@ _stats: dict = {
     "active_sniper_orders":  0,
 }
 
+# ── On-chain wallet cache (refreshed every 60s in background) ────────────────
+_wallet_cache: dict = {
+    "address":      "",
+    "usdc_native":  0.0,
+    "usdc_e":       0.0,
+    "pusd":         0.0,
+    "pol":          0.0,
+    "total_usdc":   0.0,
+    "needs_swap":   False,
+    "needs_deposit": False,
+    "has_gas":      True,
+    "last_updated": 0,
+    "error":        "",
+}
+_wallet_cache_lock = threading.Lock()
+
+
+def _refresh_wallet_cache(address: str) -> None:
+    """Fetch on-chain Polygon balances and update _wallet_cache. Safe to call from any thread."""
+    global _wallet_cache
+    try:
+        balances = get_all_balances(address)
+        usdc_native = balances.get("USDC_NATIVE", 0.0)
+        usdc_e      = balances.get("USDC_E", 0.0)
+        pusd        = balances.get("pUSD", 0.0)
+        pol         = balances.get("POL", 0.0)
+        total_usdc  = usdc_native + usdc_e + pusd
+        with _wallet_cache_lock:
+            _wallet_cache.update({
+                "address":       address,
+                "usdc_native":   round(usdc_native, 6),
+                "usdc_e":        round(usdc_e, 6),
+                "pusd":          round(pusd, 6),
+                "pol":           round(pol, 6),
+                "total_usdc":    round(total_usdc, 6),
+                "needs_swap":    usdc_native > 0.5 and usdc_e == 0.0,
+                "needs_deposit": usdc_e > 0.5 and pusd == 0.0,
+                "has_gas":       pol > 0.005,
+                "last_updated":  time.time(),
+                "error":         "",
+            })
+    except Exception as exc:
+        with _wallet_cache_lock:
+            _wallet_cache["error"] = str(exc)
+            _wallet_cache["last_updated"] = time.time()
+
+
+def _start_wallet_refresh_loop(address: str) -> None:
+    """Background thread: refresh on-chain wallet cache every 60 seconds."""
+    def _loop():
+        while True:
+            _refresh_wallet_cache(address)
+            time.sleep(60)
+    t = threading.Thread(target=_loop, daemon=True, name="wallet-cache")
+    t.start()
+
 
 # ── Dashboard HTML ──────────────────────────────────────────────────────────
 
@@ -530,6 +589,18 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   .bal-card .bv{font-size:1.1rem;font-weight:700;margin-top:2px}
   @media(max-width:900px){.row4{grid-template-columns:1fr 1fr}.row2{grid-template-columns:1fr}.bal-grid{grid-template-columns:1fr 1fr}}
   @media(max-width:540px){.row4{grid-template-columns:1fr}.bal-grid{grid-template-columns:1fr 1fr}}
+  /* Deposit status banner */
+  .dep-banner{display:none;border-radius:10px;padding:14px 18px;margin-bottom:14px;border:1px solid;font-size:.83rem;line-height:1.6}
+  .dep-banner.warn{background:rgba(243,156,18,.08);border-color:rgba(243,156,18,.4);color:#f39c12}
+  .dep-banner.info{background:rgba(88,166,255,.08);border-color:rgba(88,166,255,.35);color:#58a6ff}
+  .dep-banner.ok{background:rgba(46,204,113,.08);border-color:rgba(46,204,113,.35);color:#2ecc71}
+  .dep-banner strong{display:block;font-size:.88rem;margin-bottom:4px}
+  .dep-banner code{background:#21262d;padding:2px 7px;border-radius:4px;font-size:.78rem;font-family:monospace;color:#e6edf3;display:inline-block;margin-top:4px}
+  .dep-steps{margin-top:8px;padding-left:16px;color:#e6edf3;font-size:.78rem}
+  .dep-steps li{margin:3px 0}
+  .dep-bal-row{display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:.78rem;color:#e6edf3}
+  .dep-bal-row span{opacity:.75}
+  .dep-bal-row b{color:inherit}
 </style>
 </head>
 <body>
@@ -539,6 +610,18 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
   <span>Last scan: <span id="lastScan">&ndash;</span></span>
   <span id="modeBadge" class="badge" style="background:#2ecc7122;color:#2ecc71">⚡ LIVE</span>
   <span><span class="dot"></span><span id="tradeSize">&ndash;</span>/trade</span>
+</div>
+
+<!-- Deposit status banner (auto-shown when Polymarket balance = $0) -->
+<div class="dep-banner warn" id="depBanner">
+  <strong id="depTitle">&#x26A0;&#xFE0F; Polymarket balance $0 — Bot tidak bisa trading</strong>
+  <div class="dep-bal-row">
+    <span>On-chain USDC native: <b id="dNative">–</b></span>
+    <span>USDC.e (bridged): <b id="dUsdce">–</b></span>
+    <span>pUSD (Polymarket): <b id="dPusd">–</b></span>
+    <span>POL gas: <b id="dPol">–</b></span>
+  </div>
+  <div id="depInstructions"></div>
 </div>
 
 <!-- Balance display -->
@@ -915,12 +998,77 @@ async function fetchCompare(){
   }catch(e){}
 }
 
+async function fetchWallet(){
+  try{
+    const w=await fetch('/api/wallet').then(r=>r.json());
+    const banner=document.getElementById('depBanner');
+    const title=document.getElementById('depTitle');
+    const instr=document.getElementById('depInstructions');
+    const pmBal=parseFloat(document.getElementById('b-wallet').textContent.replace('$','')||'0');
+
+    // Update on-chain balance display inside banner
+    document.getElementById('dNative').textContent='$'+parseFloat(w.usdc_native||0).toFixed(2);
+    document.getElementById('dUsdce').textContent='$'+parseFloat(w.usdc_e||0).toFixed(2);
+    document.getElementById('dPusd').textContent='$'+parseFloat(w.pusd||0).toFixed(2);
+    document.getElementById('dPol').textContent=parseFloat(w.pol||0).toFixed(3);
+
+    // Decision logic
+    if(w.last_updated===0){banner.style.display='none';return;}
+
+    const polyBal=parseFloat(w.pusd||0);
+    const native=parseFloat(w.usdc_native||0);
+    const usdce=parseFloat(w.usdc_e||0);
+
+    if(polyBal>0.5){
+      // Has Polymarket balance — all good, hide banner
+      banner.style.display='none';
+    } else if(native<0.5&&usdce<0.5&&polyBal<0.5){
+      // Truly empty
+      banner.className='dep-banner warn';
+      banner.style.display='';
+      title.innerHTML='&#x26A0;&#xFE0F; Wallet kosong — tidak ada USDC ditemukan';
+      instr.innerHTML=`<ul class="dep-steps">
+        <li>Top up USDC ke address: <code>${w.address||'–'}</code></li>
+        <li>Kirim via Polygon network (bukan ETH mainnet)</li>
+        <li>Butuh minimal 0.01 POL untuk gas (sudah ada: ${parseFloat(w.pol||0).toFixed(3)} POL)</li>
+      </ul>`;
+    } else if(w.needs_swap){
+      // Has native USDC but needs swap to USDC.e
+      banner.className='dep-banner warn';
+      banner.style.display='';
+      title.innerHTML='&#x26A0;&#xFE0F; Punya '+native.toFixed(2)+' USDC native — perlu di-swap ke USDC.e dulu';
+      instr.innerHTML=`<ul class="dep-steps">
+        <li>Polymarket pakai <b>USDC.e</b> (bridged), bukan USDC native</li>
+        <li>Jalankan swap: <code>python -m src.utils.swap_usdc</code></li>
+        <li>Setelah swap, deposit ke Polymarket: <code>python -m src.utils.deposit</code></li>
+      </ul>`;
+    } else if(w.needs_deposit){
+      // Has USDC.e but not yet deposited to Polymarket
+      banner.className='dep-banner info';
+      banner.style.display='';
+      title.innerHTML='&#x1F4E5; Punya '+usdce.toFixed(2)+' USDC.e — belum di-deposit ke Polymarket';
+      instr.innerHTML=`<ul class="dep-steps">
+        <li>USDC.e sudah ada di wallet Polygon kamu</li>
+        <li>Jalankan deposit: <code>python -m src.utils.deposit</code></li>
+        <li>Setelah deposit, bot otomatis bisa mulai trading</li>
+      </ul>`;
+    } else {
+      // Unknown state — hide
+      banner.style.display='none';
+    }
+  }catch(e){
+    document.getElementById('depBanner').style.display='none';
+  }
+}
+
 setInterval(fetchStats,5000);
 setInterval(fetchErrors,10000);
 setInterval(fetchCompare,15000);
+setInterval(fetchWallet,30000);
 fetchStats();
 fetchErrors();
 fetchCompare();
+fetchWallet();
 </script>
 </body>
 </html>"""
@@ -975,6 +1123,10 @@ def _start_health_server() -> None:
                     "db_stats":     trade_db.get_db_stats(mode="live"),
                     "strategy_pnl": trade_db.get_strategy_pnl_totals(mode="live"),
                 })
+
+            elif self.path.startswith("/api/wallet"):
+                with _wallet_cache_lock:
+                    self._send_json(dict(_wallet_cache))
 
             elif self.path.startswith("/api/errors"):
                 self._send_json(list(_error_log))
