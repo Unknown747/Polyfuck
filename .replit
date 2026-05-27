@@ -32,7 +32,7 @@ args = "python -m src.bot"
 
 [deployment]
 deploymentTarget = "vm"
-run = ["python", "-m", "src.bot", "--dry-run"]
+run = ["python", "-m", "src.bot"]
 
 [[ports]]
 localPort = 8080
