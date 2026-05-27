@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -159,17 +159,23 @@ class MispricingScanner:
                 ): m
                 for m in candidates
             }
-            for future in as_completed(future_map):
-                try:
-                    opp = future.result()
-                    if opp:
-                        cat = future_map[future].get("_category", "")
-                        if cat:
-                            opp.categories = [cat]
-                        opportunities.append(opp)
-                        self._category_stats[cat] = self._category_stats.get(cat, 0) + 1
-                except Exception as exc:
-                    logger.debug("Mispricing: CLOB check failed: %s", exc)
+            try:
+                for future in as_completed(future_map, timeout=90):
+                    try:
+                        opp = future.result()
+                        if opp:
+                            cat = future_map[future].get("_category", "")
+                            if cat:
+                                opp.categories = [cat]
+                            opportunities.append(opp)
+                            self._category_stats[cat] = self._category_stats.get(cat, 0) + 1
+                    except Exception as exc:
+                        logger.debug("Mispricing: CLOB check failed: %s", exc)
+            except FuturesTimeoutError:
+                logger.warning(
+                    "Mispricing: CLOB batch timed out after 90s — using %d partial results",
+                    len(opportunities),
+                )
 
         elapsed = time.time() - t0
         self._consecutive_failures = 0

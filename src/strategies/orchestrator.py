@@ -191,7 +191,7 @@ class Orchestrator:
         for t in threads:
             t.start()
         for t in threads:
-            t.join(timeout=60)  # Max 60s per strategy batch
+            t.join(timeout=45)  # Max 45s per strategy batch — leaves room for graceful shutdown
 
         # Phase 2: apply results in priority order — this updates _active_condition_ids cooldowns.
         # Mispricing, NearResolved, Correlated run first so their cooldowns are written

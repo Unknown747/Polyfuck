@@ -270,7 +270,9 @@ class PolymarketBot:
                 console.print(f"[red]Error in scan loop: {e}[/]")
 
             console.print(f"[dim]Next scan in {config.SCAN_INTERVAL_SEC}s...[/]")
-            time.sleep(config.SCAN_INTERVAL_SEC)
+            _wake = time.time() + config.SCAN_INTERVAL_SEC
+            while self.running and time.time() < _wake:
+                time.sleep(1)
 
     def _run_redemption(self) -> None:
         """Check for and process redeemable positions.
@@ -397,16 +399,18 @@ class PolymarketBot:
 
     def _shutdown(self) -> None:
         if self.clob._authenticated:
-            try:
-                self.trader.cancel_all()
-            except Exception as e:
-                logger.warning("Shutdown: cancel_all failed: %s", e)
+            _t = threading.Thread(target=self.trader.cancel_all, daemon=True)
+            _t.start()
+            _t.join(timeout=6)
+            if _t.is_alive():
+                logger.warning("Shutdown: cancel_all timed out after 6s — leaving open orders")
 
         if config.AUTO_REDEEM and self.redeemer:
-            try:
-                self._run_redemption()
-            except Exception as e:
-                logger.warning("Shutdown: redemption failed: %s", e)
+            _t = threading.Thread(target=self._run_redemption, daemon=True)
+            _t.start()
+            _t.join(timeout=6)
+            if _t.is_alive():
+                logger.warning("Shutdown: redemption timed out after 6s — skipping")
 
         if self.positions:
             self.positions.save_snapshot()
