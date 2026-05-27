@@ -130,6 +130,8 @@ class Orchestrator:
         # so the same market can be traded again after the cooldown window.
         self._active_condition_ids: dict[str, float] = {}
         self._scan_count: int = 0
+        # Lock protecting shared dicts written by parallel scan threads
+        self._results_lock = threading.Lock()
 
         self._mode: str = "live"
 
@@ -244,36 +246,42 @@ class Orchestrator:
     ) -> None:
         try:
             opps = self.mispricing.scan(categories=cats)
-            results["mispricing"] = opps
-            self._health["mispricing"].record_success()
+            with self._results_lock:
+                results["mispricing"] = opps
+                self._health["mispricing"].record_success()
         except Exception as e:
-            errors["mispricing"] = str(e)
-            self._health["mispricing"].record_failure(str(e))
-            results["mispricing"] = []
+            with self._results_lock:
+                errors["mispricing"] = str(e)
+                self._health["mispricing"].record_failure(str(e))
+                results["mispricing"] = []
 
     def _run_near_resolved(
         self, cats: list[str], results: dict, errors: dict
     ) -> None:
         try:
             opps = self.nr_scanner.scan(categories=cats)
-            results["near_resolved"] = opps
-            self._health["near_resolved"].record_success()
+            with self._results_lock:
+                results["near_resolved"] = opps
+                self._health["near_resolved"].record_success()
         except Exception as e:
-            errors["near_resolved"] = str(e)
-            self._health["near_resolved"].record_failure(str(e))
-            results["near_resolved"] = []
+            with self._results_lock:
+                errors["near_resolved"] = str(e)
+                self._health["near_resolved"].record_failure(str(e))
+                results["near_resolved"] = []
 
     def _run_correlated(
         self, cats: list[str], results: dict, errors: dict
     ) -> None:
         try:
             pairs = self.corr_scanner.scan(categories=cats)
-            results["correlated"] = pairs
-            self._health["correlated"].record_success()
+            with self._results_lock:
+                results["correlated"] = pairs
+                self._health["correlated"].record_success()
         except Exception as e:
-            errors["correlated"] = str(e)
-            self._health["correlated"].record_failure(str(e))
-            results["correlated"] = []
+            with self._results_lock:
+                errors["correlated"] = str(e)
+                self._health["correlated"].record_failure(str(e))
+                results["correlated"] = []
 
     def _run_sniper(
         self, cats: list[str], results: dict, errors: dict
@@ -294,12 +302,14 @@ class Orchestrator:
         """Phase 1: scan-only (no order placement). Safe to run in parallel."""
         try:
             sniper_scan = self.sniper.scan_markets(categories=cats)
-            results["sniper"] = sniper_scan
-            self._health["sniper"].record_success()
+            with self._results_lock:
+                results["sniper"] = sniper_scan
+                self._health["sniper"].record_success()
         except Exception as e:
-            errors["sniper"] = str(e)
-            self._health["sniper"].record_failure(str(e))
-            results["sniper"] = {}
+            with self._results_lock:
+                errors["sniper"] = str(e)
+                self._health["sniper"].record_failure(str(e))
+                results["sniper"] = {}
 
     def _place_sniper(self, results: dict, errors: dict) -> None:
         """Phase 2: place orders AFTER other strategies have updated cooldowns.

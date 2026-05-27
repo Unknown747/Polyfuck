@@ -14,6 +14,7 @@ from src.utils.api import ClobClient
 from src.scanner.scanner import Mispricing, NearResolvedOpportunity
 
 console = Console()
+logger = logging.getLogger("polymarket-bot")
 
 
 @dataclass
@@ -102,7 +103,7 @@ class Trader:
                 "total_exposure_usd": self._total_exposure_usd,
             }))
         except Exception as e:
-            _log.warning("_persist_daily_pnl write failed: %s", e)
+            logger.warning("_persist_daily_pnl write failed: %s", e)
 
     def estimate_fee(self, price: float, size: float, category: str = "crypto") -> float:
         """Estimate taker fee for a trade.
@@ -605,51 +606,75 @@ class Trader:
         price: float,
         condition_id: str,
         order_type: str = "GTC",
+        _retries: int = 3,
     ) -> Trade | None:
-        """Place an order on the CLOB using EIP-712 signing."""
-        try:
-            from py_clob_client_v2 import OrderArgs, MarketOrderArgs, OrderType, CreateOrderOptions
+        """Place an order on the CLOB using EIP-712 signing.
 
-            if price > 0:
-                # Limit order: size is dollar amount → convert to shares
-                # BUG FIX: use round() before conversion to avoid fixed-point truncation
-                shares = round(size / price, 4)
-                order_args = OrderArgs(
+        Retries up to _retries times on transient errors (429, 502, 503, etc.)
+        with exponential back-off so a momentary rate-limit doesn't lose a trade.
+        """
+        import time as _time
+        last_exc: Exception | None = None
+
+        for attempt in range(1, _retries + 1):
+            try:
+                from py_clob_client_v2 import OrderArgs, MarketOrderArgs, OrderType, CreateOrderOptions
+
+                if price > 0:
+                    # Limit order: size is dollar amount → convert to shares
+                    # BUG FIX: use round() before conversion to avoid fixed-point truncation
+                    shares = round(size / price, 4)
+                    order_args = OrderArgs(
+                        token_id=token_id,
+                        price=round(price, 4),
+                        size=shares,
+                        side=side,
+                    )
+                    options = CreateOrderOptions(tick_size=0.01)
+                    response = self.clob._client.create_and_post_order(
+                        order_args, options, OrderType(order_type)
+                    )
+                else:
+                    # Market order (FOK): size is share count
+                    order_args = MarketOrderArgs(
+                        token_id=token_id,
+                        amount=round(size, 4),
+                    )
+                    response = self.clob._client.create_and_post_order(
+                        order_args, None, OrderType.FOK
+                    )
+
+                order_id = response.get("orderID", "") if isinstance(response, dict) else ""
+                console.print(f"[green]Order placed: {order_id or '(pending)'}[/]")
+                return Trade(
+                    market_question="",
+                    condition_id=condition_id,
                     token_id=token_id,
-                    price=round(price, 4),
-                    size=shares,
                     side=side,
-                )
-                options = CreateOrderOptions(tick_size=0.01)
-                response = self.clob._client.create_and_post_order(
-                    order_args, options, OrderType(order_type)
-                )
-            else:
-                # Market order (FOK): size is share count
-                order_args = MarketOrderArgs(
-                    token_id=token_id,
-                    amount=round(size, 4),
-                )
-                response = self.clob._client.create_and_post_order(
-                    order_args, None, OrderType.FOK
+                    price=price,
+                    size=size,
+                    order_type=order_type,
+                    status="pending",
+                    order_id=order_id,
                 )
 
-            order_id = response.get("orderID", "") if isinstance(response, dict) else ""
-            console.print(f"[green]Order placed: {order_id or '(pending)'}[/]")
-            return Trade(
-                market_question="",
-                condition_id=condition_id,
-                token_id=token_id,
-                side=side,
-                price=price,
-                size=size,
-                order_type=order_type,
-                status="pending",
-                order_id=order_id,
-            )
-        except Exception as e:
-            console.print(f"[red]Order failed: {e}[/]")
-            return None
+            except Exception as e:
+                last_exc = e
+                err_str = str(e).lower()
+                # Retry on transient rate-limit / server errors only
+                transient = any(code in err_str for code in ("429", "502", "503", "504", "timeout", "connection"))
+                if transient and attempt < _retries:
+                    wait = 2 ** attempt  # 2s, 4s back-off
+                    logger.warning(
+                        "_place_order: transient error (attempt %d/%d), retrying in %ds: %s",
+                        attempt, _retries, wait, e,
+                    )
+                    _time.sleep(wait)
+                    continue
+                break
+
+        console.print(f"[red]Order failed after {_retries} attempt(s): {last_exc}[/]")
+        return None
 
     def _check_live_balance(self, investment_usd: float) -> bool:
         """Verify USDC balance and MATIC gas before placing a live order."""
