@@ -338,8 +338,8 @@ class PolymarketBot:
         if len(hist) > 50:
             hist = hist[-50:]
 
-        # Refresh wallet balance every 10 scans (or at startup)
-        if self._scan_count % 10 == 1:
+        # Refresh wallet balance every 3 scans (or at startup)
+        if self._scan_count % 3 == 1:
             self._wallet_balance = self._fetch_wallet_balance()
 
         # Orchestrator health
@@ -854,22 +854,22 @@ async function fetchErrors(){
   }catch(e){}
 }
 
-// Paper vs Live comparison chart
+// Live Strategy P&L chart
 const cmpCtx=document.getElementById('cmpChart').getContext('2d');
 const cmpChart=new Chart(cmpCtx,{
   type:'bar',
   data:{
     labels:['Mispricing','Near-Resolved','Correlated','Sniper'],
     datasets:[
-      {label:'Paper',data:[0,0,0,0],
-       backgroundColor:'rgba(88,166,255,0.55)',borderColor:'#58a6ff',borderWidth:1,borderRadius:4},
-      {label:'Live', data:[0,0,0,0],
-       backgroundColor:'rgba(46,204,113,0.55)',borderColor:'#2ecc71',borderWidth:1,borderRadius:4},
+      {label:'Live P&L',data:[0,0,0,0],
+       backgroundColor:['rgba(88,166,255,0.7)','rgba(46,204,113,0.7)','rgba(155,89,182,0.7)','rgba(231,76,60,0.7)'],
+       borderColor:['#58a6ff','#2ecc71','#9b59b6','#e74c3c'],
+       borderWidth:1,borderRadius:5},
     ]
   },
   options:{responsive:true,animation:false,
     plugins:{
-      legend:{display:true,labels:{color:'#8b949e',font:{size:11}}},
+      legend:{display:false},
       tooltip:{callbacks:{label:c=>'$'+parseFloat(c.raw).toFixed(4)}}
     },
     scales:{
@@ -900,18 +900,17 @@ async function fetchCompare(){
     ];
     rows.forEach(([pre,lv])=>{
       const le=document.getElementById(pre+'-live');
+      if(!le)return;
       le.textContent=fmtPnl(lv);
       le.style.color=parseFloat(lv||0)>=0?'#2ecc71':'#e74c3c';
     });
 
     const lTotal=(lp.mispricing||0)+(lp.near_resolved||0)+(lp.correlated||0)+(lp.sniper||0);
     const ltEl=document.getElementById('cmp-total-live');
-    ltEl.textContent=fmtPnl(lTotal);
-    ltEl.style.color=lTotal>=0?'#2ecc71':'#e74c3c';
+    if(ltEl){ltEl.textContent=fmtPnl(lTotal);ltEl.style.color=lTotal>=0?'#2ecc71':'#e74c3c';}
 
-    // Chart — single live dataset
+    // Update single live dataset
     cmpChart.data.datasets[0].data=[lp.mispricing||0,lp.near_resolved||0,lp.correlated||0,lp.sniper||0];
-    if(cmpChart.data.datasets[1])cmpChart.data.datasets.splice(1,1);
     cmpChart.update('none');
   }catch(e){}
 }
