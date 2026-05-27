@@ -102,6 +102,7 @@ class ClobClient:
             )
 
         from eth_account import Account
+        from py_clob_client_v2 import AssetType, BalanceAllowanceParams
         account = Account.from_key(private_key)
         self.address = account.address
 
@@ -118,6 +119,21 @@ class ClobClient:
         self.api_secret = creds.api_secret
         self.api_passphrase = creds.api_passphrase
         self._authenticated = True
+
+        # Register our on-chain balance with the CLOB so it allows maker orders.
+        # Without this call, POST /order returns "maker address not allowed".
+        try:
+            self._client.update_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+        except Exception:
+            pass  # non-fatal; order placement will fail fast if balance still unrecognised
+        try:
+            self._client.update_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.CONDITIONAL)
+            )
+        except Exception:
+            pass
 
         return {
             "apiKey": creds.api_key,

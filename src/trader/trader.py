@@ -616,9 +616,31 @@ class Trader:
         import time as _time
         last_exc: Exception | None = None
 
+        # Pre-fetch neg_risk so create_and_post_order doesn't have to look it up
+        # internally (was failing with "required positional argument: 'neg_risk'").
+        # Use PartialCreateOrderOptions (all fields Optional) — correct type for
+        # create_and_post_order.  The library resolves tick_size automatically from
+        # its market-info cache; we only pin neg_risk to avoid the internal lookup.
+        try:
+            neg_risk: bool | None = self.clob._client.get_neg_risk(token_id)
+        except Exception:
+            neg_risk = None  # let the library look it up if pre-fetch fails
+
         for attempt in range(1, _retries + 1):
             try:
-                from py_clob_client_v2 import OrderArgs, MarketOrderArgs, OrderType, CreateOrderOptions
+                from py_clob_client_v2 import (
+                    OrderArgs, MarketOrderArgs, OrderType,
+                    PartialCreateOrderOptions,
+                )
+
+                # OrderType is a plain class with string constants, not an enum.
+                # Map string → class attribute so "GTC"/"FOK"/"GTD" all resolve correctly.
+                _ot_map = {"GTC": OrderType.GTC, "FOK": OrderType.FOK,
+                           "GTD": OrderType.GTD, "FAK": getattr(OrderType, "FAK", OrderType.FOK)}
+                resolved_order_type = _ot_map.get(order_type.upper(), OrderType.GTC)
+                # PartialCreateOrderOptions: both fields Optional — library fetches
+                # tick_size automatically from the CLOB API.
+                options = PartialCreateOrderOptions(neg_risk=neg_risk)
 
                 if price > 0:
                     # Limit order: size is dollar amount → convert to shares
@@ -630,9 +652,8 @@ class Trader:
                         size=shares,
                         side=side,
                     )
-                    options = CreateOrderOptions(tick_size=0.01)
                     response = self.clob._client.create_and_post_order(
-                        order_args, options, OrderType(order_type)
+                        order_args, options, resolved_order_type
                     )
                 else:
                     # Market order (FOK): size is share count
@@ -641,7 +662,7 @@ class Trader:
                         amount=round(size, 4),
                     )
                     response = self.clob._client.create_and_post_order(
-                        order_args, None, OrderType.FOK
+                        order_args, options, OrderType.FOK
                     )
 
                 order_id = response.get("orderID", "") if isinstance(response, dict) else ""
