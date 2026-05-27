@@ -23,7 +23,7 @@ import json
 import logging
 import time
 import datetime
-import threading
+
 from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -262,8 +262,8 @@ class OrderbookSniper:
                             try:
                                 import src.utils.db as _sniper_db
                                 _sniper_db.insert_trade(trade, "", "sniper", mode="live")
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logger.debug("DB insert_trade failed (sniper): %s", e)
                             self._trader.register_entry(condition_id, price, size_usd)
             except Exception as e:
                 logger.warning("OrderbookSniper: place failed tier %d: %s", tier_num, e)

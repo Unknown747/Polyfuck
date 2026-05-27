@@ -5,7 +5,6 @@ import subprocess
 from pathlib import Path
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from web3 import Web3
 
 try:
     from cryptography.fernet import Fernet

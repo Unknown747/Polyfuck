@@ -1,11 +1,8 @@
 """Logging and formatting utilities."""
 
 import json
-import time
 from datetime import datetime, timezone
 from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
 
 console = Console()
 

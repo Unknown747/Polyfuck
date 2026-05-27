@@ -3,7 +3,6 @@
 Run: python -m src.wallet
 """
 
-import sys
 from src.wallet.wallet import create_wallet, load_wallet, wallet_summary, KEYS_FILE
 
 

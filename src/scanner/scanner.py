@@ -1,10 +1,8 @@
 """Market scanner - detects mispriced markets and cross-market arbitrage opportunities."""
 
 import json
-import time
 import datetime
 from dataclasses import dataclass, field
-from typing import Any
 from rich.console import Console
 from rich.table import Table
 

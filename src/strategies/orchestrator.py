@@ -358,13 +358,13 @@ class Orchestrator:
                 try:
                     self.db.insert_trade(trade, category, "mispricing", mode=self._mode)
                     self.db.insert_opportunity("mispricing", opp.market_question, opp.edge_pct, True, mode=self._mode)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("DB write failed (mispricing trade): %s", e)
             else:
                 try:
                     self.db.insert_opportunity("mispricing", opp.market_question, opp.edge_pct, False, mode=self._mode)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("DB write failed (mispricing opp): %s", e)
 
     def _apply_near_resolved(
         self, results: dict, errors: dict, out: StrategyResult
@@ -401,13 +401,13 @@ class Orchestrator:
                 try:
                     self.db.insert_trade(trade, "", "near_resolved", mode=self._mode)
                     self.db.insert_opportunity("near_resolved", opp.market_question, opp.return_pct, True, mode=self._mode)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("DB write failed (near_resolved trade): %s", e)
             else:
                 try:
                     self.db.insert_opportunity("near_resolved", opp.market_question, opp.return_pct, False, mode=self._mode)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("DB write failed (near_resolved opp): %s", e)
 
     def _apply_correlated(
         self, results: dict, errors: dict, out: StrategyResult
@@ -517,15 +517,15 @@ class Orchestrator:
                     self.db.insert_opportunity(
                         "correlated", pair.description[:100], pair.divergence_pct, True, mode=self._mode
                     )
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("DB write failed (correlated opp): %s", e)
                 try:
                     buy_trade.strategy = "correlated"
                     buy_trade.market_question = pair.market_a_question
                     self.db.insert_trade(buy_trade, "", "correlated", mode=self._mode)
                     self.trader.register_entry(pair.buy_market_id, pair.buy_price, inv)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("DB write failed (correlated trade): %s", e)
             except Exception as exc:
                 logger.warning("CorrelatedArb: execution error: %s", exc)
 
@@ -588,8 +588,8 @@ class Orchestrator:
                         self.db.insert_opportunity(
                             "sniper", sig.market_question, 0.0, True, mode=self._mode
                         )
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("DB write failed (sniper trade): %s", e)
             except Exception as exc:
                 logger.warning("Sniper live execution error: %s", exc)
 

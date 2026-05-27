@@ -8,7 +8,7 @@ from typing import Any
 from src.config import config
 
 try:
-    from py_clob_client_v2 import ClobClient as OfficialClobClient, ApiCreds
+    from py_clob_client_v2 import ClobClient as OfficialClobClient
     HAS_OFFICIAL_CLIENT = True
 except ImportError:
     HAS_OFFICIAL_CLIENT = False

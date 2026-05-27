@@ -19,10 +19,9 @@ from rich.logging import RichHandler
 
 from src.config import config, Config
 from src.utils.api import GammaClient, ClobClient, DataClient
-from src.wallet.wallet import load_wallet, validate_private_key
 from src.scanner.scanner import (
-    MarketScanner, Mispricing, NearResolvedOpportunity,
-    display_opportunities, display_near_resolved,
+    MarketScanner, Mispricing,
+    display_opportunities,
 )
 from src.trader.trader import Trader
 from src.positions.positions import PositionTracker
@@ -400,14 +399,14 @@ class PolymarketBot:
         if self.clob._authenticated:
             try:
                 self.trader.cancel_all()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Shutdown: cancel_all failed: %s", e)
 
         if config.AUTO_REDEEM and self.redeemer:
             try:
                 self._run_redemption()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Shutdown: redemption failed: %s", e)
 
         if self.positions:
             self.positions.save_snapshot()

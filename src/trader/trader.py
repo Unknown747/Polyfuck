@@ -100,8 +100,8 @@ class Trader:
                 "open_positions":   self._open_position_count,
                 "total_exposure_usd": self._total_exposure_usd,
             }))
-        except Exception:
-            pass
+        except Exception as e:
+            _log.warning("_persist_daily_pnl write failed: %s", e)
 
     def estimate_fee(self, price: float, size: float, category: str = "crypto") -> float:
         """Estimate taker fee for a trade.
